@@ -25,7 +25,15 @@
 const fs = require('fs');
 const vm = require('vm');
 const path = require('path');
-const { load, readModule } = require('./export_loader.js');
+const { load, readModule, exportAvailable, CONTENT_ROOT } = require('./export_loader.js');
+
+// Skip, not fail, when the UI export is absent. This suite renders real components from the game's own
+// decompiled UI, so without the export there is nothing to press - and failing would make a fresh clone
+// red for a reason that has nothing to do with the code. The runner reports the variable that fixes it.
+if (!exportAvailable()) {
+  console.log('SKIP: press_test needs the game UI export (F1M_UI_EXPORT), not found at ' + CONTENT_ROOT);
+  process.exit(0);
+}
 
 const PRESS = path.join(
   __dirname, '..', '..', 'pak', 'f1manager24', 'Content', 'UIGameface', 'js', 'coop', 'press.js'
