@@ -256,6 +256,49 @@ def file_hash(path):
         return None
 
 
+def read_side(bin_dir):
+    """Read `coop_side.txt` from a `Binaries\\Win64` directory: 'host', 'client', or None.
+
+    The agent resolves its player identity from this file (it cannot see the injector's environment), and
+    the side decides which half of `ClockGate` its pause reports feed. Both machines defaulting to Host
+    does not fail loudly - it silently arbitrates both players as the host, which is worse than refusing.
+    """
+    try:
+        with open(os.path.join(bin_dir, 'coop_side.txt'), 'r', encoding='utf-8') as f:
+            v = f.readline().strip().lower()
+        return v if v in ('host', 'client') else (v or None)
+    except OSError:
+        return None
+
+
+def built_agent():
+    """Hash and size of the agent this tree builds, or (None, None) if it has not been built.
+
+    The agent size used to be hard-coded here (305152) and went stale the moment the agent gained code, which
+    made every preflight fail on a check that was really about "did the build happen". Comparing against the
+    artefact is the check that was actually meant.
+
+    Order matters and got this wrong once: the workspace pins its output via `.cargo/config.toml`
+    (`target-dir = E:/TEMP/coop-target`), so an *in-tree* `target/release` is a stale leftover from an older
+    build. Preferring it made the gate compare a two-month-old binary against the install and fail a machine
+    that was correctly deployed. The pinned location is therefore asked for first.
+    """
+    here = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    candidates = [
+        # Explicit override wins, for a machine that builds somewhere unusual.
+        os.environ.get('COOP_AGENT_DLL', ''),
+        # The pinned target dir from .cargo/config.toml - the one `cargo build --release` actually writes.
+        r'E:\TEMP\coop-target\release\coop_agent.dll',
+        os.path.join(here, 'coop-rs', 'target', 'release', 'coop_agent.dll'),
+    ]
+    for p in candidates:
+        if p and os.path.exists(p):
+            h = file_hash(p)
+            if h:
+                return h, os.path.getsize(p)
+    return None, None
+
+
 def remote(script, timeout=40):
     """Run a PowerShell snippet on the client machine through its agent, returning stdout.
 
@@ -353,9 +396,30 @@ def main():
           'no hook stub found - inject coop_agent.dll')
     c.add(bool(cb), 'host hook callback registered', ('0x%X' % cb) if cb else 'callback is null')
 
+    # The agent that is *installed* must match the agent this tree builds. Asking "is it 305152 bytes" was a
+    # build-staleness check in disguise and broke the moment the agent grew; comparing hashes says what was
+    # meant. If the tree has not been built, that is a named failure rather than a size mismatch nobody can act on.
+    want_hash, want_size = built_agent()
     h_dll, h_size = sha16(os.path.join(HOST_BIN, 'coop_agent.dll'))
-    c.add(h_size == 305152, 'host agent is the current build',
-          ('%s bytes %s' % (h_size, h_dll)) if h_size else 'missing')
+    if want_hash is None:
+        c.pending(False, 'agent build available',
+                  'no coop_agent.dll in the tree - run cargo build --release -p coop-agent')
+    else:
+        c.add(h_dll is not None and file_hash(os.path.join(HOST_BIN, 'coop_agent.dll')) == want_hash,
+              'host agent matches the build',
+              ('%s bytes %s' % (h_size, h_dll)) if h_size else 'missing - run tools/remote.py deploy-link')
+
+    # Which player this machine is. Load-bearing, and silent when wrong: the agent reads coop_side.txt
+    # because it cannot see the injector's environment, and the side decides whose half of ClockGate its
+    # pause reports feed. Two machines both saying Host arbitrates both players as the host - a wrong clock
+    # owner rather than an error, which is why this is a hard check and not a warning.
+    h_side = read_side(HOST_BIN)
+    c.add(h_side == 'host', 'host side file says host',
+          h_side or 'missing coop_side.txt - the agent would default to Host, which is only right by luck')
+    c_side = read_side(CLIENT_BIN)
+    if c_side is not None or os.path.isdir(CLIENT_BIN):
+        c.add(c_side == 'client', 'client side file says client',
+              c_side or 'missing coop_side.txt - both machines would claim Host and arbitration breaks')
 
     # Publishers: exactly one, and pointed at the live game.
     pubs = [p for p in processes('coop-link.exe')
@@ -382,8 +446,10 @@ def main():
 
     if reachable:
         c_dll, c_size = sha16(os.path.join(CLIENT_BIN, 'coop_agent.dll'))
-        c.add(c_size == 305152, 'client agent is the current build',
-              ('%s bytes %s' % (c_size, c_dll)) if c_size else 'missing')
+        if want_hash is not None:
+            c.add(file_hash(os.path.join(CLIENT_BIN, 'coop_agent.dll')) == want_hash,
+                  'client agent matches the build',
+                  ('%s bytes %s' % (c_size, c_dll)) if c_size else 'missing - run tools/remote.py deploy-link')
 
         c.bin_size, _ = sha16(os.path.join(CLIENT_BIN, 'coop-link.exe'))
         c_ls, _ = sha16(os.path.join(CLIENT_BIN, 'coop-link.exe'))
@@ -393,16 +459,36 @@ def main():
         agent_log = log_tail(os.path.join(CLIENT_BIN, 'coop_agent.log'))
         joined = '\n'.join(agent_log)
 
+        # A log from a previous session proves nothing about *this* one, and it is actively misleading: the
+        # first run of this gate reported "client hook has fired, total 72903 calls" from a two-day-old file
+        # while no game was running at all. Counters are therefore only trusted when the log is recent enough
+        # to belong to the session being tested.
+        try:
+            log_age = time.time() - os.path.getmtime(os.path.join(CLIENT_BIN, 'coop_agent.log'))
+        except OSError:
+            log_age = None
+        log_is_current = log_age is not None and log_age < 3600
+        c.pending(log_is_current, 'client agent log is from this session',
+                  ('%ds old' % log_age) if log_age is not None else 'no coop_agent.log')
+
         fired = [int(m.group(1)) for line in agent_log
                  for m in [re.search(r'hook fired x\d+ \(total (\d+)\)', line)] if m]
-        c.pending(bool(fired), 'client hook has fired',
-                  ('total %d calls' % fired[-1]) if fired else
-                  'never fired - no race is running on the client yet')
+        if not log_is_current:
+            c.pending(False, 'client hook has fired',
+                      'counters are from an old log - start the client and re-run')
+        else:
+            c.pending(bool(fired), 'client hook has fired',
+                      ('total %d calls' % fired[-1]) if fired else
+                      'never fired - no race is running on the client yet')
 
         applied = [int(m.group(1)) for line in agent_log
                    for m in [re.search(r'mailbox applied=(\d+)', line)] if m]
-        c.pending(bool(applied) and applied[-1] > 0, 'client agent has applied frames',
-                  ('applied=%d' % applied[-1]) if applied else 'nothing applied yet')
+        if not log_is_current:
+            c.pending(False, 'client agent has applied frames',
+                      'counters are from an old log - start the client and re-run')
+        else:
+            c.pending(bool(applied) and applied[-1] > 0, 'client agent has applied frames',
+                      ('applied=%d' % applied[-1]) if applied else 'nothing applied yet')
 
         c.bin_tyres = (log_tail(os.path.join(CLIENT_BIN, 'coop_tyres.txt'), 1) or ['(none)'])[0].strip()
         c.add(c.bin_tyres in ('observe', 'wear', 'full'),
@@ -489,14 +575,28 @@ def main():
     # by the install running an old pak rather than by anything in the code: the game holds the file
     # open, so the copy silently did not happen. A stale pak is compared by size and hash against the
     # build, which is cheap and cannot be fooled.
+    #
+    # It also checks the *location*. A loose `*_P.pak` in `Content/Paks/` root is never mounted - only paks
+    # under `~mods/` are - so a byte-identical pak in the wrong folder loads nothing and produces exactly the
+    # same symptom as a stale one: no multiplayer entry, no error. Checking only the hash would report
+    # "identical" for a deployment that cannot work.
     for label, root in (('host', HOST_BIN), ('client', CLIENT_BIN)):
         if label == 'client' and not reachable:
             continue
         # HOST_BIN ends in `<game>\F1Manager24\Binaries\Win64`, so the game root is three levels up.
         game_root = os.path.dirname(os.path.dirname(os.path.dirname(root)))
-        installed = os.path.join(game_root, 'F1Manager24', 'Content', 'Paks', 'CoopBridge_P.pak')
+        paks = os.path.join(game_root, 'F1Manager24', 'Content', 'Paks')
+        installed = os.path.join(paks, '~mods', 'CoopBridge_P.pak')
+        misplaced = os.path.join(paks, 'CoopBridge_P.pak')
         built = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
                              'pak', 'CoopBridge_P.pak')
+
+        if not os.path.isdir(os.path.join(paks, '~mods')):
+            c.add(False, '%s mods directory exists' % label,
+                  'no `~mods` in %s - loose paks in Paks/ root are never mounted' % paks)
+        elif os.path.exists(misplaced):
+            c.add(False, '%s pak is in the mount directory' % label,
+                  'found in Paks/ root, which is ignored - move it into ~mods/')
         if not os.path.exists(built):
             c.add(False, '%s coop pak is built' % label, 'missing %s' % built)
             continue

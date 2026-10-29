@@ -181,7 +181,33 @@ def verify_build(repak: str) -> list[str]:
 
 
 def installed_path(game_root: str) -> str:
-    return os.path.join(game_root, 'F1Manager24', 'Content', 'Paks', PAK_NAME)
+    """Where a loose UI pak has to live for the game to mount it.
+
+    `Content/Paks/` root is NOT a mods directory. The engine mounts its own signed chunks from there and
+    ignores anything else; a loose `*_P.pak` dropped beside them loads nothing. Mod paks are read from
+    `Content/Paks/~mods/`, which is the convention every mod manager on this game uses - the Vortex/TFG
+    manifest in this install writes each mod to `Paks/~mods/<mod-id>/...`.
+
+    This was previously `Paks/<name>` and it cost a session: the pak was deployed, hash-verified, reported
+    "identical", and the game never saw it. The symptom is the worst kind - no error anywhere, just a menu
+    with no multiplayer entry, indistinguishable from a code regression.
+    """
+    return os.path.join(game_root, 'F1Manager24', 'Content', 'Paks', '~mods', PAK_NAME)
+
+
+def mods_dir(game_root: str) -> str:
+    return os.path.join(game_root, 'F1Manager24', 'Content', 'Paks', '~mods')
+
+
+def mods_disabled(game_root: str) -> bool:
+    """True when `~mods` has been renamed (e.g. `~mods.off`) to turn mods off.
+
+    Worth detecting explicitly: with `~mods` gone the game mounts nothing of ours and there is no other
+    signal. `deploy()` would otherwise create a fresh `~mods` and report success while the player runs with
+    mods disabled by intent.
+    """
+    paks = os.path.join(game_root, 'F1Manager24', 'Content', 'Paks')
+    return (not os.path.isdir(mods_dir(game_root))) and os.path.isdir(os.path.join(paks, '~mods.off'))
 
 
 def client_game_root(share: str) -> str:
@@ -203,6 +229,15 @@ def check_installed(game_root: str, label: str = 'host') -> list[str]:
 
 def deploy(game_root: str, label: str = 'host') -> bool:
     target = installed_path(game_root)
+
+    # Say it out loud when mods have been switched off, instead of quietly creating `~mods` again. A player
+    # who renamed the folder to disable mods does not want a mod re-enabling itself, and either way the
+    # deploy has to be visible rather than "successful" into a directory the game ignores.
+    if mods_disabled(game_root):
+        print('  ! %s has mods DISABLED: `~mods` is missing and `~mods.off` exists.' % label)
+        print('    Nothing of ours will load until mods are enabled. Rename `~mods.off` back to `~mods`,')
+        print('    or pass --force-mods-dir to create `~mods` anyway.')
+
     os.makedirs(os.path.dirname(target), exist_ok=True)
     try:
         shutil.copy2(PAK_OUT, target)

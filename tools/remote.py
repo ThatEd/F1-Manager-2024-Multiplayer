@@ -47,6 +47,12 @@ GAME_SAVES = r'%LOCALAPPDATA%\F1Manager24\Saved\SaveGames'
 GAME_PAKS = r'\SteamLibrary\steamapps\common\F1 Manager 2024\F1Manager24\Content\Paks'
 GAME_BIN = r'\SteamLibrary\steamapps\common\F1 Manager 2024\F1Manager24\Binaries\Win64'
 
+# The host's own install. An environment override exists because the drive differs between machines, and a
+# hard-coded path that is wrong writes a side file into a directory nothing reads - which looks like a
+# configured machine until the arbitration silently picks the wrong owner.
+HOST_GAME = os.environ.get('COOP_GAME', r'E:\Steam\steamapps\common\F1 Manager 2024')
+HOST_BIN = os.path.join(HOST_GAME, 'F1Manager24', 'Binaries', 'Win64')
+
 LOCAL_PAK = os.path.join(os.path.dirname(os.path.abspath(__file__)), '..', 'pak', 'CoopBridge_P.pak')
 
 
@@ -563,6 +569,25 @@ def cmd_deploy_link():
     push('coop-link.exe')
     push('coop_agent.dll')
     push('coop-inject.exe')
+
+    # Write the side file as part of the deploy, on both machines.
+    #
+    # The agent cannot see the injector's environment, so it reads `coop_side.txt` from next to the exe. That
+    # file decides whose half of the pause gate this machine feeds. Two machines both defaulting to Host does
+    # not fail - it silently arbitrates both players as the host - so leaving it to a human step is how a LAN
+    # test loses an hour to a bug that is really a missing text file.
+    host_bin = HOST_BIN
+    for label, path, value in (
+        ('host', os.path.join(host_bin, 'coop_side.txt'), 'host'),
+        ('client', SHARE + GAME_BIN + '\\coop_side.txt', 'client'),
+    ):
+        try:
+            with open(path, 'w', encoding='utf-8', newline='\n') as f:
+                f.write(value + '\n')
+            print('%-16s %s -> %s' % ('side', path, value))
+        except OSError as exc:
+            print('%-16s could not write %s: %s' % ('side', path, exc))
+
     print()
     print('Now: enable the hook on that machine (create coop_hook.enable next to the exe, or set')
     print('COOP_AGENT_HOOK=1), then run `python remote.py attach-client`. The agent must be INJECTED')

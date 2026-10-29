@@ -103,6 +103,10 @@ if shutil.which("node"):
     # is green-with-visible-gaps instead of red for a reason unrelated to the code.
     suite("drive", ["node", "drive_test.js"], HEADLESS, lambda out: passed_count(out, 10))
     suite("render", ["node", "probe_render.js"], HEADLESS, lambda out: passed_count(out, 10))
+    # The entry point a player interacts with. Nothing covered this until "no multiplayer button" was
+    # reported against two builds: every other suite tests a module, and nobody had tested whether the
+    # module that draws the button can actually reach the menu.
+    suite("lobby", ["node", "lobby_boot_test.js"], HEADLESS, lambda out: passed_count(out, 12))
 
     # ---- JS: end-to-end against a real supervisor process ------------------------------------
     # Needs the built supervisor binary. `cargo build --release` produces it; the runner builds it
