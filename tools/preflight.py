@@ -593,10 +593,10 @@ def main():
 
         if not os.path.isdir(os.path.join(paks, '~mods')):
             c.add(False, '%s mods directory exists' % label,
-                  'no `~mods` in %s - loose paks in Paks/ root are never mounted' % paks)
+                  'no `~mods` in %s (loose paks elsewhere do mount, so this is convention, not a blocker)' % paks)
         elif os.path.exists(misplaced):
             c.add(False, '%s pak is in the mount directory' % label,
-                  'found in Paks/ root, which is ignored - move it into ~mods/')
+                  'found in Paks/ root; it will still load, but ~mods is where mod managers expect it')
         if not os.path.exists(built):
             c.add(False, '%s coop pak is built' % label, 'missing %s' % built)
             continue

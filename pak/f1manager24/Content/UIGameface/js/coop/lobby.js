@@ -245,7 +245,17 @@
                                 FDiv: FDiv.FDiv,
                                 StandardBackground: StandardBackground.StandardBackground,
                                 MainMenu: MainMenu,
-                                nav: Nav,
+                                /* `FrontendNavigation` exports `set` as a separate named function, NOT as a
+                                   `nav.set` method - the module is a bag of functions, not an object with
+                                   methods. Passing the namespace therefore produced a `nav` whose `.set` was
+                                   undefined, so every `ctx.nav.set(...)` call below threw. It surfaced as
+                                   "no multiplayer button" only because the injection guard ran first.
+
+                                   Wrapped into the shape the rest of this file expects, with the namespace
+                                   kept on `.module` so anything else it needs is still reachable. */
+                                nav: Nav && typeof Nav.set === "function"
+                                    ? { set: Nav.set, module: Nav }
+                                    : Nav,
                                 screens: Screens,
                                 frontendData: FrontendData,
                                 GameTypes: GameTypes,
@@ -902,8 +912,15 @@
                     // menu and break it, while this function carried on reporting success. A mod that must
                     // not disturb normal play cannot have that failure mode: no button is a cosmetic loss,
                     // a broken menu is not.
-                    if (typeof ctx.MenuButton !== "function" || typeof ctx.nav === "undefined") {
-                        log("menu injection skipped: MenuButton or navigation unavailable");
+                    //
+                    // NOTE: this check must test what is actually used. An earlier version tested
+                    // `typeof ctx.nav === "undefined"`, which passes for the module *namespace* - but
+                    // `FrontendNavigation` exports `set` as a separate named function, not a `nav.set` method,
+                    // so the guard approved an object whose `.set` did not exist and the injection died later.
+                    // Testing the callable is the only version that catches that.
+                    if (typeof ctx.MenuButton !== "function" || typeof ctx.nav !== "object" ||
+                        typeof ctx.nav.set !== "function") {
+                        log("menu injection skipped: MenuButton or a callable nav.set unavailable");
                         return tree;
                     }
 

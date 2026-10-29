@@ -94,23 +94,24 @@ def check_js_syntax(paths: list[str]) -> list[str]:
 
 
 def expected_files() -> set[str]:
-    """Every file that should be in the pak, relative to PAK_SRC, from the HTML pages and the scripts
-    they load.
+    """Every file that should be in the pak, as it appears *inside the pak*.
 
-    Derived rather than hard-coded so adding a script to a page cannot silently leave it out of the
-    check. This also catches the opposite failure, which happened once: a scratch file left in the coop
-    folder was packed and shipped, because nothing compared the pak's contents against the intended set.
+    The prefix matters: entries are stored relative to the game root because the mount point is
+    `../../../`. Returning bare names here made the stray-file guard compare a bare list against
+    prefixed entries and report every single file as a stray - which is how the guard behaved the moment
+    the prefix was fixed, rather than passing silently.
     """
     want = set()
+    prefix = 'F1Manager24/Content/UIGameface/'
     for root, _dirs, names in os.walk(PAK_SRC):
         for n in names:
             if n.endswith('.html'):
                 rel = os.path.relpath(os.path.join(root, n), PAK_SRC).replace('\\', '/')
-                want.add(rel)
+                want.add(prefix + rel)
     # Scripts the pak is meant to contain. Listed explicitly: these are the files whose contents matter,
     # and a new one should be a deliberate edit here.
     for s in ('js/coop/bridge.js', 'js/coop/lobby.js', 'js/coop/press.js', 'js/coop/observe.js'):
-        want.add(s)
+        want.add(prefix + s)
     return want
 
 
@@ -137,18 +138,68 @@ def build(repak: str) -> None:
     # make the verification below meaningless.
     if os.path.exists(PAK_OUT):
         os.remove(PAK_OUT)
-    mount = os.path.relpath(PROJECT, PROJECT)  # "" -> the pak root is the project root
-    cmd = [repak, 'pack', '-m', '../../../', '--version', 'V11', PAK_SRC, PAK_OUT]
-    res = run(cmd)
-    print(res.stdout.strip() or res.stderr.strip())
-    if res.returncode != 0 or not os.path.exists(PAK_OUT):
-        raise SystemExit('repak failed')
+
+    # Paths inside the pak must match what the game looks up *relative to the mount point*.
+    #
+    # The mount point is `../../../` - three up from `<game>/F1Manager24/Content/Paks` is the game root -
+    # so an entry is resolved as `<game root>/<entry>`. The entry therefore has to be
+    # `F1Manager24/Content/UIGameface/Frontend.html`, not `Frontend.html`.
+    #
+    # This was wrong, and it was the whole "no multiplayer button" bug. Packing from `Content/UIGameface`
+    # stored bare paths, so `Frontend.html` resolved to `<game root>/Frontend.html`, which is nothing. The
+    # pak loaded, was byte-identical on both machines, had the right version and mount point, and listed
+    # exactly the intended files - and overrode nothing. Every check this script made passed.
+    #
+    # What exposed it was comparing against a working mod pak in the install
+    # (`F1M2021_TEST_PR_S_UI_P.pak`), which ships `F1Manager24/Content/UIGameface/js/...` - the full path,
+    # not a bare one.
+    #
+    # So repak is given a staging tree whose root is the directory *containing* `F1Manager24/`, which makes
+    # it emit the full relative path for each file.
+    staging = tempfile.mkdtemp(prefix='coop-pak-')
+    try:
+        for name in os.listdir(PAK_SRC):
+            src = os.path.join(PAK_SRC, name)
+            dst = os.path.join(staging, 'F1Manager24', 'Content', 'UIGameface', name)
+            if os.path.isdir(src):
+                shutil.copytree(src, dst)
+            else:
+                os.makedirs(os.path.dirname(dst), exist_ok=True)
+                shutil.copy2(src, dst)
+        cmd = [repak, 'pack', '-m', '../../../', '--version', 'V11', staging, PAK_OUT]
+        res = run(cmd)
+        print(res.stdout.strip() or res.stderr.strip())
+        if res.returncode != 0 or not os.path.exists(PAK_OUT):
+            raise SystemExit('repak failed')
+    finally:
+        shutil.rmtree(staging, ignore_errors=True)
     print('  built %s (%d bytes)' % (os.path.basename(PAK_OUT), os.path.getsize(PAK_OUT)))
 
 
 def verify_build(repak: str) -> list[str]:
     """Unpacks the pak just built and compares the files that matter against the source tree."""
     problems = []
+
+    # Check the entry *paths* before anything else, because a pak whose paths do not match the mount point
+    # loads and overrides nothing while passing every content check. That is exactly what happened: the
+    # entries were `Frontend.html` instead of `F1Manager24/Content/UIGameface/Frontend.html`, so the game
+    # resolved them to `<game root>/Frontend.html`. Size, hash, version, mount point and file list were all
+    # correct; the pak was simply addressing nothing. A working mod pak in the install
+    # (`F1M2021_TEST_PR_S_UI_P.pak`) ships the full path, which is how the discrepancy was found.
+    listing = run([repak, 'list', PAK_OUT])
+    entries = [l.strip().replace('\\', '/') for l in (listing.stdout or '').replace('\r', '\n').split('\n')]
+    entries = [e for e in entries if e and not e.startswith('Packed')]
+    want_prefix = 'F1Manager24/Content/UIGameface/'
+    if entries:
+        bad = [e for e in entries if not e.startswith(want_prefix)]
+        if bad:
+            problems.append(
+                'pak entries are missing the %s prefix (%d of %d, e.g. %s) - with mount point ../../../ '
+                'these resolve to the game root and override nothing'
+                % (want_prefix, len(bad), len(entries), bad[0]))
+        else:
+            print('  ok, every entry is under %s' % want_prefix)
+
     with tempfile.TemporaryDirectory(prefix='coop-pak-') as tmp:
         # `-o` is the output flag (a bare positional is ignored and repak derives the folder from the
         # archive name instead), and `-f` lets it write into an existing directory.
@@ -181,16 +232,12 @@ def verify_build(repak: str) -> list[str]:
 
 
 def installed_path(game_root: str) -> str:
-    """Where a loose UI pak has to live for the game to mount it.
+    """Where the UI pak is installed.
 
-    `Content/Paks/` root is NOT a mods directory. The engine mounts its own signed chunks from there and
-    ignores anything else; a loose `*_P.pak` dropped beside them loads nothing. Mod paks are read from
-    `Content/Paks/~mods/`, which is the convention every mod manager on this game uses - the Vortex/TFG
-    manifest in this install writes each mod to `Paks/~mods/<mod-id>/...`.
-
-    This was previously `Paks/<name>` and it cost a session: the pak was deployed, hash-verified, reported
-    "identical", and the game never saw it. The symptom is the worst kind - no error anywhere, just a menu
-    with no multiplayer entry, indistinguishable from a code regression.
+    `~mods` by convention: it is where every mod manager on this game writes, so a player's existing tools
+    see our pak alongside their others. Loose paks under `Content/Paks/` root do mount too - a claim to the
+    contrary here was wrong and cost time - but the root is where the game's own chunks live and mixing into
+    it is untidy rather than broken.
     """
     return os.path.join(game_root, 'F1Manager24', 'Content', 'Paks', '~mods', PAK_NAME)
 
