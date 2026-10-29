@@ -107,6 +107,10 @@ if shutil.which("node"):
     # reported against two builds: every other suite tests a module, and nobody had tested whether the
     # module that draws the button can actually reach the menu.
     suite("lobby", ["node", "lobby_boot_test.js"], HEADLESS, lambda out: passed_count(out, 12))
+    # Whether the game can resolve what is in the pak at all. This is the check that was missing when the
+    # button failed: every other check asked "was the pak built from the right files", none asked "will the
+    # game find them", and a pak with bare entry paths loads and overrides nothing.
+    suite("pak", ["node", "pak_paths_test.js"], HEADLESS, lambda out: passed_count(out, 8))
 
     # ---- JS: end-to-end against a real supervisor process ------------------------------------
     # Needs the built supervisor binary. `cargo build --release` produces it; the runner builds it
