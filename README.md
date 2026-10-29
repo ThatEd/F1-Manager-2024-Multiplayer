@@ -47,9 +47,14 @@ python -I run_all_tests.py redaction   # no private identifiers in the tree
 Currently: **231 Rust tests, 196 JS assertions across 8 suites**, plus a publishability check that fails
 if a private path has leaked into the tree. All of it passes from a clean clone.
 
+Verified by cloning the published repo into an empty directory and running it there: `ALL OK (3 skipped:
+press, drive, render)`. Three suites render real components from the game's decompiled UI, so without the
+export they skip themselves with a named reason rather than failing — a fresh clone is green with visible
+gaps instead of red for a reason that has nothing to do with the code.
+
 `e2e` builds the supervisor itself rather than skipping, because it is the only suite that proves two
-peers actually exchange coordination frames. The two render suites skip themselves, with a named reason,
-when the decompiled UI export is not present — see [Getting the data](#getting-the-data).
+peers actually exchange coordination frames. Without the decompiled UI export (`F1M_UI_EXPORT`), the three
+render-dependent suites skip themselves — see [Getting the data](#getting-the-data).
 
 To build and deploy the UI mod (needs the game installed, and the game closed):
 
@@ -153,9 +158,21 @@ The repo ships code, not game data. Two things are generated from **your own cop
 | The Gameface UI export | `tools/headless` render + drive tests (skipped without it) | decompiled from the game's paks |
 | Offsets and per-build addresses | `coop-mem`, the injection path | per-build artefacts for one exe hash |
 
-Point the tools at an export with the `F1M_EXPORT` environment variable (see
-[docs/HEADLESS-HARNESS.md](docs/HEADLESS-HARNESS.md)); without it those two suites skip themselves
-with a named reason instead of failing.
+Point the tools at an export with the `F1M_UI_EXPORT` environment variable — the directory containing
+`UIGameface/`, i.e. `.../F1Manager24/Content`:
+
+```powershell
+$env:F1M_UI_EXPORT = "D:\exports\F1Manager24\Content"
+python -I run_all_tests.py
+```
+
+Without it, the three suites that render real components skip themselves with a named reason and the
+rest still pass. See [docs/HEADLESS-HARNESS.md](docs/HEADLESS-HARNESS.md) for how the harness boots the
+game's own RequireJS tree from that export.
+
+`tools/redact_private.py` runs as part of the suite. It is a test, not a chore: this bundle is published
+under the owner's account, and a personal path in a doc is the kind of thing that survives review
+because nobody re-reads a 150 KB write-up. It fails the run if any identifier remains.
 
 ## What is not here
 
