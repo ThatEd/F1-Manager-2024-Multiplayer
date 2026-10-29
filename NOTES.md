@@ -32,7 +32,7 @@ Active F1M24 modding scene: DatabaseEditor (save editor, v3.6.2), F1Manager2024L
 Test install copied to `local/f1-manager-2024/test-install` (isolated from owner's install).
 - UE4SS v3.0.1 already installed with 10 mods including SplitScreenMod and ConsoleEnablerMod
 - Engine: UE 5.1 (from UE4SS-settings.ini EngineVersionOverride)
-- Save location: `%LOCALAPPDATA%\..\Local\F1Manager24\Saved\` (SaveGames, SaveGames2, SaveGames4, SaveGamesS)
+- Save location: `%LOCALAPPDATA%\F1Manager24\Saved\` (SaveGames, SaveGames2, SaveGames4, SaveGamesS)
 - Instance-local config created in test-install\F1Manager24\Saved\Config\Windows\ (Engine.ini, GameUserSettings.ini, Input.ini) — windowed 1280x720, VSync off
 - No anti-cheat detected
 
@@ -1644,7 +1644,7 @@ an injected DLL cannot see the injector's environment.
 
 ### Client install
 
-`\\<client>\e\SteamLibrary\...\Win64` is **read-only** for this machine: the write probe is
+`\\<client-pc>\e\SteamLibrary\...\Win64` is **read-only** for this machine: the write probe is
 denied even though the NTFS ACL grants `Authenticated Users: Modify`, so the share itself is
 read-only. Nothing was written there. Binaries are staged in `local/f1-manager-2024/client-package/`
 with `INSTALL.md`. Two-machine addresses: this machine `192.168.1.101`, client `192.168.1.100`.
@@ -2117,7 +2117,7 @@ copying by hand, no debugger.
 
 ### What ran
 
-| time | host (192.168.1.101) | other PC (<client-host>, 192.168.1.100) |
+| time | host (192.168.1.101) | other PC (<client-pc>, 192.168.1.100) |
 |---|---|---|
 | 18:37:37 | `Load save2` queued | ? |
 | 18:37:49 | `page=RaceWeekend` | (not running yet) |
@@ -2152,7 +2152,7 @@ The viewer is for *reading* saves; the actual files live in
 ### Remote control of the second machine (new)
 
 `tools/remote.py` runs code on that PC over the SMB share, because it has no SSH, no WinRM and no open
-coop port ? but `\\<client>\e` is **writable**.
+coop port ? but `\\<client-pc>\e` is **writable**.
 
 ```
 req\<id>.cmd  -> agent executes in a child PowerShell
@@ -3208,3 +3208,59 @@ so it had been running without the multiplayer tile. Both are now deployed and h
 Tests: Rust 235 (was 231: +2 Steam constants, +2 layout, +2 team claim in proto... see suite output), JS
 `teams` 12/12 new, `e2e` 21/21 (was 16), `menu_test` 36/36 (invite button asserted). Full bundle: all 11 suites
 OK. Nothing has yet been run against a live Steam client, so invites remain the one thing this cannot prove.
+
+### Corrections to the entry above
+
+Three things I got wrong in that entry, worth recording because each produced a false conclusion:
+
+1. **"The redaction gate had never been registered as a suite" - wrong, and my fix made it worse.** It *was*
+   registered, but the `suite("redaction", ...)` call sat inside `build_supervisor()` after that function's
+   `return ""`, so it never executed. The tool itself worked when run directly, which is why the README looked
+   correct. My first attempt added a *second* registration; the real fix moved the existing one to module
+   level. Lesson: read the whole file before concluding something is absent - `Select-String` for the name
+   would have shown line 158.
+
+2. **The runner had a duplicate suite name and I did not notice while editing it.** `lobby` was registered
+   twice (lobby_api_test.js and lobby_boot_test.js). `SUITES` is a dict, so the second silently replaced the
+   first: the Steam endpoint suite had not run for as long as both existed. `suite()` now raises on a
+   duplicate. Renamed to `steam` and `boot`.
+
+3. **`press` did not "start failing" - I was running two suites at once.** Its exit was 4294967295 (-1) with
+   no output, which is a crash, not an assertion failure. Run alone: 24/24. Resource contention from the
+   concurrent run, reported here so the next person does not chase a phantom.
+
+Also fixed a genuine flake: three supervisor tests slept a guessed 120 ms for both agents to register and
+failed ~1 run in 3 under a parallel debug build. They now poll the agents registry for the real condition,
+which also took that suite from 3.2 s to 0.25 s. And the claim tests share the global `CLAIMS` map, so they
+are serialised on a mutex - one failed because a sibling test released the host role between two claims.
+
+### Pak staleness: the check that always fired
+
+`deploy_pak.py` and `preflight.py` both compared the installed pak to the built one by SHA-256. They reported
+`STALE: installed 139085 bytes, built 139085 bytes` after a fresh copy of that exact build. Cause: repak does
+not order entries stably, so two builds from identical sources differ byte for byte (first differing offset 8,
+the first entry's header). A check that always fails is worse than no check, because the real stale client pak
+- a 123,816-byte copy in `~mods` shadowing the new one in the Paks root - was found by hand while this said
+nothing useful.
+
+Both tools now compare `repak hash-list` output (per-entry SHA-256, sorted). Verified by planting an old build
+on the client: the check fires. Restoring the current one: it passes. `install-pak` also installs to `~mods`
+and deletes any copy in the Paks root, so the two-copies state cannot recur.
+
+### Deployment state, 2026-10-29 ~23:40
+
+Both machines: agent 509,440 bytes `e72ebba8ecd170a1`, `coop-link` `e21f7c0f`, pak 139,085 bytes content-equal,
+`coop_side.txt` = host / client respectively. Nothing is running, so every "game running"/"hook fired" check is
+correctly red. **No live session has been attempted with this build.** What is *proven* is unit and integration
+level: the team claim crosses a real supervisor (e2e 21/21) and one player cannot take every team (teams 12/12,
+which extracts and runs the real `pickTeam`). What remains unproven is unchanged and is all in a live game:
+whether the Steam callback fires, whether a lobby is joinable, and whether two humans can play a race.
+
+### The client was reachable the whole time
+
+The LAN moved from 192.168.1.x to 10.32.231.x and back. A hostname lookup and a ping to one remembered IP both
+failed, and that was written up as "the client is not up on this network" - twice. It was up at 192.168.1.100
+with 4 days CPU uptime, and `remote.py ping` works. `remote.py` and `preflight.py` now try several candidate
+addresses instead of trusting one. **A failed name lookup is not evidence a machine is off.** When the client
+was first reached it had a stale agent (428,544 vs 508,928) and no pak in `~mods` at all beyond an old one, so
+it had been running with no current multiplayer tile - which is the other half of "the old bugs are still here".
