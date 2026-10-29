@@ -1,0 +1,29 @@
+[package]
+name = "coop-mem"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+coop-proto = { path = "../coop-proto" }
+coop-auth = { path = "../coop-auth" }
+
+[[bin]]
+name = "coop-probe"
+path = "src/bin/probe.rs"
+
+[[bin]]
+name = "coop-sql"
+path = "src/bin/sql.rs"
+
+[[bin]]
+name = "coop-transplant"
+path = "src/bin/transplant.rs"
+
+[[bin]]
+name = "coop-sweep"
+path = "src/bin/sweep.rs"
+
+[[bin]]
+name = "coop-retarget"
+path = "src/bin/retarget.rs"

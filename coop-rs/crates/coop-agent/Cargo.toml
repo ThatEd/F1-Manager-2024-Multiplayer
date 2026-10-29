@@ -1,0 +1,14 @@
+[package]
+name = "coop-agent"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+
+[lib]
+name = "coop_agent"
+crate-type = ["cdylib", "rlib"]
+path = "src/lib.rs"
+
+[dependencies]
+coop-proto = { path = "../coop-proto" }
+coop-mem = { path = "../coop-mem" }

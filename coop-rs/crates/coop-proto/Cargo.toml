@@ -1,0 +1,9 @@
+[package]
+name = "coop-proto"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+
+[lib]
+name = "coop_proto"
+path = "src/lib.rs"

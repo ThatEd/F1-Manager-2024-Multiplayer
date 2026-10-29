@@ -1,0 +1,34 @@
+[package]
+name = "coop-link"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+
+[[bin]]
+name = "coop-link"
+path = "src/main.rs"
+
+[[bin]]
+name = "coop-watch"
+path = "src/bin/watch.rs"
+
+[[bin]]
+name = "coop-keys"
+path = "src/bin/keys.rs"
+
+[[bin]]
+name = "coop-spy"
+path = "src/bin/spy.rs"
+
+[dependencies]
+coop-proto = { path = "../coop-proto" }
+coop-mem = { path = "../coop-mem" }
+coop-inject = { path = "../coop-inject" }
+
+[[bin]]
+name = "coop-hwbp"
+path = "src/bin/hwbp.rs"
+
+[[bin]]
+name = "coop-fakehost"
+path = "src/bin/fakehost.rs"

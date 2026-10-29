@@ -1,0 +1,15 @@
+"lang"
+{
+	"Language" "english"
+	"Tokens"
+	{
+		"#Coop_MainMenu"            "Main menu"
+		"#Coop_NewGame"             "Creating A New Game"
+		"#Coop_Career_Managing"     "%coop_season% %coop_team%: Managing"
+		"#Coop_Career_Racing"       "%coop_season% %coop_team%: %coop_activity%"
+		"#Coop_Career_Leading"      "%coop_season% %coop_team%: Leading the championship"
+		"#Coop_Career_Engines"      "%coop_season% %coop_team%: Choosing engines"
+		"#Coop_Mp_Career"           "Multiplayer %coop_season% %coop_team% %coop_players%"
+		"#Coop_Mp_Race"             "Multiplayer %coop_season% %coop_team% %coop_players% %coop_track%"
+	}
+}

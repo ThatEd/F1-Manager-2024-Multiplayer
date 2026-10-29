@@ -1,0 +1,13 @@
+[package]
+name = "coop-supervisor"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+
+[[bin]]
+name = "coop-supervisor"
+path = "src/main.rs"
+
+[dependencies]
+coop-proto = { path = "../coop-proto" }
+coop-mem = { path = "../coop-mem" }

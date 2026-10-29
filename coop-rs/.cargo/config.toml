@@ -1,0 +1,10 @@
+﻿# Pin the build directory so every shell agrees where the binaries are.
+#
+# Why this exists: this project builds into E:\TEMP\coop-target because a Defender-style lock on the
+# in-tree `target\debug\deps\coop_agent-*.exe` broke incremental builds. That was previously set per
+# shell via CARGO_TARGET_DIR, which meant a *fresh* shell silently built somewhere else - and the deploy
+# step then shipped a stale binary while reporting "VERIFY: OK". It has cost two test cycles.
+#
+# With this file, `cargo build --release` always writes here, and tools/remote.py reads the same value.
+[build]
+target-dir = "E:/TEMP/coop-target"

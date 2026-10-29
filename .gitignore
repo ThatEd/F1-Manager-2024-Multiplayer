@@ -1,0 +1,39 @@
+# Private state: game installs, saves, dumps, offsets, probe output and upstream source copies.
+#
+# This lives at the bundle root on purpose. If this folder is extracted into its own repository the
+# hub's .gitignore does not come with it, and the contents of local/ must still never be published:
+# they are decompressed game data, per-build offsets and multi-gigabyte sandbox installs.
+local/
+F1M2024/local/
+test-install/
+UE4SS_extract/
+ue4ss-src/
+
+# The built pak and the built agent are artefacts, not source. `python tools/deploy_pak.py` makes
+# them. Committing a binary that is regenerated from source is how a stale build gets shipped.
+pak/*.pak
+*.dll
+*.exe
+
+# Rust build output. The workspace pins its target dir outside the tree (.cargo/config.toml), but a
+# bare `cargo build` without that file still writes here.
+target/
+
+# Tool and test leftovers
+__pycache__/
+*.pyc
+*.log
+*.dmp
+*.bak
+ui-sweep.json
+.css-index.json
+
+# Editor and OS noise
+.vs/
+.vscode/
+*.swp
+Thumbs.db
+desktop.ini
+.DS_Store
+# Supervisor run artefact: written into its working directory on every agent announcement.
+coop_rsm.txt

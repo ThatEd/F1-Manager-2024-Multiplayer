@@ -1,0 +1,13 @@
+[workspace]
+resolver = "2"
+members = ["crates/coop-proto", "crates/coop-auth", "crates/coop-supervisor", "crates/coop-mem", "crates/coop-agent", "crates/coop-inject", "crates/coop-link"]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.75"
+
+[profile.release]
+opt-level = 3
+lto = true
+panic = "abort"
