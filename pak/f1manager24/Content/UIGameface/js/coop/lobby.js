@@ -386,9 +386,17 @@
 
             var role = this.state.role || "host";
             lsSet(KEY_TEAM, id);
+            // A player holds exactly one team, so claiming releases whatever this role held before - the same
+            // rule the agent applies (`claim_team` retains on `r != role`).
+            //
+            // The previous version dropped keys whose *string* did not equal the numeric `this.state.myTeam`.
+            // Object keys are always strings, so `"1" !== 1` was true for every key and nothing was ever
+            // released: one player could click through all ten teams, hold all ten, and the other player was
+            // refused every one of them - "player 1 can take every team and lock them".
             var next = {};
             for (var k in this.state.takenBy) {
-                if (k !== this.state.myTeam) next[k] = this.state.takenBy[k];
+                var who = this.state.takenBy[k];
+                if (who !== role) next[k] = who;
             }
             next[id] = role;
             this.setState({ myTeam: id, takenBy: next });
@@ -489,6 +497,26 @@
                 });
         };
 
+        Screen.prototype.invite = function () {
+            var self = this;
+            if (this.state.role !== "host") {
+                this.setStatus("choose Host first - an invite points at the lobby this machine hosts", true);
+                return;
+            }
+            // The overlay needs a lobby id, and the id only exists once Steam has answered `CreateLobby`.
+            // Reporting that plainly beats opening a dialog for a lobby Steam has never heard of: a friend
+            // would accept and connect to nothing, with no way to tell why.
+            this.setStatus("opening the Steam invite dialog...");
+            agent("lobby/invite", "POST")
+                .then(function (r) {
+                    if (r && r.error) self.setStatus("cannot invite: " + r.error, true);
+                    else if (r && r.invited) self.setStatus("Steam invite dialog opened for lobby " + r.lobby_id);
+                })
+                .catch(function (e) {
+                    self.setStatus("cannot invite: " + String(e.message || e), true);
+                });
+        };
+
         // Both routes go through the same code the single-player menu uses, so nothing about the
         // career flow is reimplemented here.
         Screen.prototype.newGame = function () {
@@ -517,6 +545,12 @@
             // they would connect to nothing and have no way to tell.
             if (this.state && this.state.role === "host") {
                 agent("lobby/set?state=idle", "POST").catch(function () { /* nothing to report */ });
+            }
+            // Give the team back. Holding it after leaving the screen would mark that team taken for the
+            // other player forever, with nobody on it - indistinguishable from a stuck claim.
+            if (this.state && this.state.myTeam) {
+                agent("release?role=" + (this.state.role || "host"), "POST").catch(function () {});
+                lsSet(KEY_TEAM, 0);
             }
             try {
                 c.nav.set(c.screens.ScreenID.MainMenu);
@@ -550,16 +584,17 @@
                 })
                 .catch(function (e) {
                     self.setState({ armed: false });
-                    /* The agent lives inside the game process, so the fix is never "start another program" -
-                     * it is "the DLL is not in this process". Saying "use the launcher" sent people looking
-                     * for a second executable that should not exist, so the message now names what is
-                     * actually missing and how it gets there. */
+                    /* The agent is a DLL inside the game process. There is nothing to start - the message must
+                     * not send anyone looking for a launcher or a separate program, because neither is the
+                     * fix. The launcher wording survived one round of editing here even though the comment
+                     * above it said not to; that is why the requirement is now spelled out in the text
+                     * itself. */
                     self.setStatus(
                         "co-op agent not in this game process (" +
                             String(e.message || e) +
-                            "). The mod's agent is a DLL injected into the game; nothing should be started" +
-                            " separately. Run coop-link --inject once against the running game, or start the" +
-                            " game through the co-op launcher, which injects it for you.",
+                            "). The agent is a DLL inside the game and is injected, not launched - there is" +
+                            " no separate program to run. Inject coop_agent.dll into the running game (the" +
+                            " injector is folded into coop-link: coop-link --inject), then reopen this screen.",
                         true
                     );
                 });
@@ -663,6 +698,18 @@
                                     modifiers: st.role === "client" ? "toggled" : "",
                                     onSelect: function () {
                                         self.join();
+                                    },
+                                }),
+                                // Steam's own friend picker, so an invite actually goes out. Without a control
+                                // for it nothing in the mod ever opened the dialog, which is why invites could
+                                // not be sent by hand either - the lobby existed but there was no way to use it.
+                                h(c.SimpleButton, {
+                                    label: "Invite a friend",
+                                    icon: "/img/icons/externalLink.svg",
+                                    // Only meaningful while hosting: it needs a lobby id, which only the host has.
+                                    modifiers: st.role === "host" ? "" : "disabled",
+                                    onSelect: function () {
+                                        self.invite();
                                     },
                                 }),
                                 h("div", { className: "CoopScreen_status" }, "Start"),

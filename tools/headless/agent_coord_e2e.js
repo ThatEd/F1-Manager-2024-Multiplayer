@@ -29,8 +29,25 @@ const SUPERVISOR = process.env.COOP_SUPERVISOR_EXE ||
   path.join('E:', 'TEMP', 'coop-target', 'release', 'coop-supervisor.exe');
 
 const MAGIC = Buffer.from('F1CP', 'ascii');
-const VERSION = 2; // bumped when Msg::Agent gained the side field
-const TAG_HELLO = 1, TAG_AGENT = 6, TAG_BYE = 5, TAG_CLOCK = 11, TAG_CONTRACT = 12, TAG_VOTE = 13;
+/**
+ * Read from the Rust source rather than hard-coded.
+ *
+ * This was `const VERSION = 2` with a comment saying it was bumped for `Msg::Agent`. When `Msg::TeamClaim`
+ * took the protocol to 3 the constant stayed at 2, and this suite kept passing against a *stale* supervisor
+ * binary - a green test proving nothing. Deriving it means a bump either works or fails loudly.
+ */
+function protoVersion() {
+  const src = fs.readFileSync(
+    path.join(__dirname, '..', '..', 'coop-rs', 'crates', 'coop-proto', 'src', 'lib.rs'),
+    'utf8'
+  );
+  const m = src.match(/pub const VERSION: u16 = (\d+);/);
+  if (!m) throw new Error('could not find VERSION in coop-proto/src/lib.rs');
+  return Number(m[1]);
+}
+const VERSION = protoVersion();
+const TAG_HELLO = 1, TAG_AGENT = 6, TAG_BYE = 5, TAG_CLOCK = 11, TAG_CONTRACT = 12, TAG_VOTE = 13,
+  TAG_TEAM = 14;
 const SIDE_HOST = 0, SIDE_CLIENT = 1;
 
 const results = [];
@@ -99,6 +116,15 @@ function voteFrame(proposal, option) {
   b.writeUInt8(TAG_VOTE, 0);
   b.writeUInt16LE(proposal, 1);
   b.writeUInt8(option, 3);
+  return frame(b);
+}
+
+/** `[TAG_TEAM, team, side]`. `team: 0` is a release. */
+function teamFrame(team, side) {
+  const b = Buffer.alloc(3);
+  b.writeUInt8(TAG_TEAM, 0);
+  b.writeUInt8(team, 1);
+  b.writeUInt8(side, 2);
   return frame(b);
 }
 
@@ -251,6 +277,32 @@ async function main() {
     const log = supLog.join('');
     ok(/refused/.test(log), 'the supervisor logged the refusal', log.split('\n').filter((l) => /refus/.test(l)).join(' | ').slice(0, 200));
     ok(/vote .*resolved|vote recorded/.test(log), 'the supervisor logged the vote tally');
+
+    // ---- 3b. a team claim reaches the other machine -------------------------------------------
+    //
+    // This is the half that was missing entirely: `/coop/claim` wrote a map inside one agent and nothing put
+    // it on the wire, so each machine saw only its own player's team. Every team looked free to the other
+    // player, and "player 1 can take every team" followed from that plus the string-vs-number compare.
+    host.r.drain(); client.r.drain();
+    host.sock.write(teamFrame(4, SIDE_HOST));
+    got = await client.r.next();
+    ok(got && got.tag === TAG_TEAM, 'a team claim reaches the client agent', got ? `tag ${got.tag}` : 'none');
+    if (got && got.tag === TAG_TEAM) {
+      // `body` is the payload *after* the tag (see the frame splitter), so team is body[0] and side body[1].
+      ok(got.body[0] === 4, 'the team id arrived intact', String(got.body[0]));
+      ok(got.body[1] === SIDE_HOST, 'the claiming side arrived intact', String(got.body[1]));
+    }
+    // A claim is for the other player only, like a clock: echoing it back would let a stale frame
+    // overwrite the claim the player just made.
+    ok((await host.r.next(300)) === null, 'the sender does not receive its own team claim back');
+
+    // A release carries team 0 and must reach the other machine too, or a team stays marked taken
+    // by a player who has left the screen.
+    host.r.drain(); client.r.drain();
+    host.sock.write(teamFrame(0, SIDE_HOST));
+    got = await client.r.next();
+    ok(got && got.tag === TAG_TEAM && got.body[0] === 0, 'a team release is relayed as team 0',
+      got ? `tag ${got.tag} team ${got.body[0]}` : 'none');
 
     // ---- 4. the other direction: game peers still relay, and agents are not in that fan-out -------
     //

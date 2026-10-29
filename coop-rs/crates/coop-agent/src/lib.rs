@@ -195,6 +195,21 @@ fn note_inbound(frame: &[u8]) {
                     .join("+")
             )
         }
+        Ok(Msg::TeamClaim { team, side }) => {
+            // The other player's team. Applied to this machine's claim map so the grid greys out what is
+            // gone, which is the whole point of sending it: a claim that is only display state would still
+            // let both players pick the same team.
+            let role = match side {
+                coop_proto::Side::Host => "host",
+                coop_proto::Side::Client => "client",
+            };
+            adopt_remote_claim(team, role);
+            if team == 0 {
+                format!("the other player released their team")
+            } else {
+                format!("the other player took team {team}")
+            }
+        }
         Ok(other) => format!("{other:?}"),
         Err(_) => "unreadable frame from supervisor".to_string(),
     };
@@ -240,6 +255,10 @@ fn set_lobby_state(s: lobby_policy::HostState, id: u64) {
 }
 
 /// JSON for `GET /coop/lobby`: what a friend would see, and why it may not be joinable.
+///
+/// `pending_join` is **peeked, not taken**: the host screen polls this endpoint to render its status, so
+/// consuming the request here would mean the very poll that displayed it also destroyed it, and the `join`
+/// call that follows would find nothing. It is cleared only by [`lobby_join`] acting on it.
 fn lobby_body() -> String {
     let (state, id) = lobby_state();
     let name = match state {
@@ -254,7 +273,7 @@ fn lobby_body() -> String {
         lobby_policy::MARKER_VALUE,
         lobby_policy::version_marker(),
         lobby_policy::advert().app_id,
-        lobby_steam::take_wanted_lobby()
+        lobby_steam::peek_wanted_lobby()
     )
 }
 
@@ -331,12 +350,28 @@ fn lobby_set(state: &str) -> String {
                 let (current, id) = lobby_state();
                 let mut lobby = id;
 
-                // Create once, when the tab opens. `CreateLobby` is asynchronous and returns no id, so a
-                // created-but-not-yet-reported lobby is discovered on a later call by `adopt`; the state is
-                // still recorded as `want` so the caller knows the request was accepted.
+                // Adopt the id Steam handed back for a `CreateLobby` on a previous pass. This runs before
+                // the create branch below so an id that arrived is used immediately rather than after
+                // another round trip - and so the marker and `SetLobbyJoinable` are written on the same
+                // pass that learns the id, instead of one poll later when the tab may already be closing.
+                if lobby == 0 {
+                    let adopted = lobby_steam::take_created_lobby();
+                    if adopted != 0 {
+                        log(&format!("steam lobby created: id={adopted}"));
+                        lobby = adopted;
+                    }
+                }
+
+                // Create once, when the tab opens. `CreateLobby` is asynchronous: it returns a
+                // `SteamAPICall_t` and the id arrives as a `LobbyCreated_t` call result, which `create`
+                // registers for. Until that result lands, `lobby` stays 0 and this is retried on the next
+                // pass - the state is still recorded as `want` so the caller knows the request was accepted.
                 if want.should_advertise() && lobby == 0 {
                     let a = lobby_policy::advert();
-                    lobby_steam::create(&api, a.lobby_type, a.max_members);
+                    let call = lobby_steam::create(&api, a.lobby_type, a.max_members);
+                    log(&format!(
+                        "steam lobby: CreateLobby -> call={call} (id arrives as a LobbyCreated_t result)"
+                    ));
                 }
 
                 if want.should_advertise() && lobby != 0 {
@@ -398,8 +433,19 @@ fn lobby_join(q: &std::collections::HashMap<String, String>) -> String {
         let (app, candidate) = match (lobby, friend) {
             (Some(l), _) => (lobby_policy::advert().app_id, l),
             (None, Some(f)) => lobby_steam::friend_lobby(&api, f),
+            // No arguments is the *normal* case, not an error. The front-end calls `lobby/join` with
+            // nothing after the player clicks "Join Game" in Steam's friends list: the id arrived on the
+            // `GameLobbyJoinRequested_t` callback and is waiting in `take_wanted_lobby`. Returning
+            // "give lobby=<id> or friend=<steamid64>" here meant the one path a real invite takes was
+            // refused before it was ever looked at.
             (None, None) => {
-                return "{\"error\":\"give lobby=<id> or friend=<steamid64>\"}".to_string()
+                let pending = lobby_steam::take_wanted_lobby();
+                if pending == 0 {
+                    return "{\"error\":\"no pending invite; click Join Game in Steam first, or pass \
+                            lobby=<id> or friend=<steamid64>\"}"
+                        .to_string();
+                }
+                (lobby_policy::advert().app_id, pending)
             }
         };
 
@@ -428,6 +474,38 @@ fn lobby_join(q: &std::collections::HashMap<String, String>) -> String {
     #[cfg(not(windows))]
     {
         let _ = (friend, lobby);
+        "{\"error\":\"Steam lobbies are only available on Windows\"}".to_string()
+    }
+}
+
+/// Opens Steam's invite overlay for the lobby this process owns.
+///
+/// The honest failure mode matters more than the success path here. Steam will happily open an invite dialog
+/// for a lobby id that does not exist, and every friend who accepts will connect to nothing - so this refuses
+/// when there is no lobby, rather than opening a dialog that cannot work.
+fn lobby_invite() -> String {
+    #[cfg(windows)]
+    {
+        let (state, id) = lobby_state();
+        if !state.should_advertise() {
+            return "{\"error\":\"not hosting: open the host tab first, which creates the lobby\"}".to_string();
+        }
+        if id == 0 {
+            return "{\"error\":\"the lobby has no id yet - Steam has not answered CreateLobby; \
+                     this takes a moment after the host tab opens\"}"
+                .to_string();
+        }
+        let api = match lobby_steam::attach() {
+            Ok(a) => a,
+            Err(e) => return format!("{{\"error\":\"{e}\"}}"),
+        };
+        lobby_steam::activate_invite_dialog(&api, id);
+        log(&format!("steam lobby: opened the invite overlay for lobby {id}"));
+        format!("{{\"invited\":true,\"lobby_id\":\"{id}\"}}")
+    }
+
+    #[cfg(not(windows))]
+    {
         "{\"error\":\"Steam lobbies are only available on Windows\"}".to_string()
     }
 }
@@ -1040,6 +1118,23 @@ fn claim_team(team: &str, role: &str) -> Vec<(String, String)> {
     claims.clone()
 }
 
+/// Applies a team claim that arrived from the other machine.
+///
+/// `team == 0` is a release. The role is the *sender's*, so this records the other player's team rather than
+/// this one's - `pickTeam` calls `/coop/claim` for the local player and this handles the far side.
+fn adopt_remote_claim(team: u8, role: &str) {
+    let mut claims = match CLAIMS.lock() {
+        Ok(c) => c,
+        Err(p) => p.into_inner(),
+    };
+    // One team per player, so whatever this role held before is released either way - including on a
+    // release, where the retain is the whole operation.
+    claims.retain(|(_, r)| r != role);
+    if team != 0 {
+        claims.push((team.to_string(), role.to_string()));
+    }
+}
+
 /// Drops a claim for a role (on Back, so a player who leaves stops holding a team).
 fn release_team(role: &str) -> Vec<(String, String)> {
     let mut claims = match CLAIMS.lock() {
@@ -1132,6 +1227,13 @@ fn serve_lobby(port: u16) {
                     ("400 Bad Request", "{\"error\":\"team is required\"}".to_string())
                 } else {
                     let claims = claim_team(&team, &role);
+                    // Put the claim on the wire. Without this the claim only ever existed inside this
+                    // process, so the other machine's team grid showed every team as free and could take
+                    // one this player already held.
+                    if let Ok(id) = team.parse::<u8>() {
+                        let frame = coop_proto::encode(&Msg::TeamClaim { team: id, side: agent_side() });
+                        queue_frame(frame);
+                    }
                     ("200 OK", format!("{{\"claims\":{}}}", claims_json(&claims)))
                 }
             }
@@ -1139,6 +1241,9 @@ fn serve_lobby(port: u16) {
                 let q = query_of(p);
                 let role = q.get("role").cloned().unwrap_or_else(|| "host".to_string());
                 let claims = release_team(&role);
+                // `team: 0` is the release marker, so the other machine clears this side's tile.
+                let frame = coop_proto::encode(&Msg::TeamClaim { team: 0, side: agent_side() });
+                queue_frame(frame);
                 ("200 OK", format!("{{\"claims\":{}}}", claims_json(&claims)))
             }
             // Coordination: the front-end reports what a player just did, and the agent turns it into a
@@ -1224,6 +1329,16 @@ fn serve_lobby(port: u16) {
             // The `+connect_lobby <id>` Steam launches the game with when an invite is accepted while the game
             // is closed. Read once by the front-end so launching from an invite actually joins.
             ("GET", "/coop/connectlobby") => ("200 OK", connect_lobby_body()),
+            // Opens Steam's own "invite a friend" overlay for our lobby.
+            //
+            // This is the step that makes "Steam invites do not work" observable at all: `InviteUserToLobby`
+            // needs a friend's SteamID chosen in advance, while the overlay lets the player pick, and Valve's
+            // guidance is to create the lobby and then let Steam present the friend list. Without an endpoint
+            // that calls it, nothing in the mod ever opened the dialog, so there was no way to send an invite
+            // by hand either.
+            (m, p) if p.starts_with("/coop/lobby/invite") && (m == "POST" || m == "GET") => {
+                ("200 OK", lobby_invite())
+            }
             ("GET", "/coop/clock") => {                let v = clock_with(|c| c.view());
                 let reasons = clock_with(|c| c.reasons());
                 (

@@ -28,13 +28,13 @@ pub mod layout;
 use std::fmt;
 
 pub const MAGIC: [u8; 4] = *b"F1CP";
-/// Bumped to 2 when `Msg::Agent` gained the side field.
+/// Bumped to 2 when `Msg::Agent` gained the side field; to 3 when `Msg::TeamClaim` was added.
 ///
 /// A version bump rather than a compatible extension on purpose: an old supervisor reading a new frame
 /// would decode a truncated `Agent` (pid and address, no side) and then delete the remainder as trailing
 /// bytes, so it would look like a working link while every coordination frame was refused for want of a
 /// side. Refusing at the header is the difference between a clear error and a silent half-message.
-pub const VERSION: u16 = 2;
+pub const VERSION: u16 = 3;
 pub const HEADER_LEN: usize = 14;
 pub const CAR_COUNT: usize = 22;
 
@@ -320,6 +320,17 @@ pub enum Msg {
         proposal: u16,
         option: u8,
     },
+    /// A player's current team, or a release.
+    ///
+    /// Sent so the other machine's team grid can grey out what is already taken. Carries a *team id* rather
+    /// than a name because `EF1Team` is an enum of bytes and a name would be a second vocabulary for the same
+    /// thing - one that could disagree with the game's.
+    TeamClaim {
+        /// `EF1Team` value, 1..=10. `0` means "I released my team".
+        team: u8,
+        /// The claiming side, so the far end can label the tile "player 1" or "player 2".
+        side: Side,
+    },
     Bye,
 }
 
@@ -518,6 +529,12 @@ const TAG_CLOCK: u8 = 11;
 const TAG_CONTRACT: u8 = 12;
 /// One player's vote on a regulation proposal.
 const TAG_VOTE: u8 = 13;
+/// Which team a player has taken, so the other machine's team picker shows it as taken.
+///
+/// Team *claims* were previously process-local: `/coop/claim` wrote a map inside one agent, and nothing ever
+/// put it on the wire. Each machine therefore saw only its own player's claim, every team looked free to the
+/// other player, and both could take the same one - the opposite of what the screen promises.
+const TAG_TEAM: u8 = 14;
 
 /// A payload plus its self-describing header.
 pub fn encode(msg: &Msg) -> Vec<u8> {
@@ -599,6 +616,11 @@ pub fn encode(msg: &Msg) -> Vec<u8> {
             w.u8(TAG_VOTE);
             w.u16(*proposal);
             w.u8(*option);
+        }
+        Msg::TeamClaim { team, side } => {
+            w.u8(TAG_TEAM);
+            w.u8(*team);
+            w.u8(side.as_u8());
         }
         Msg::Bye => w.u8(TAG_BYE),
         Msg::Ready(r) => {
@@ -699,6 +721,7 @@ pub fn decode(frame: &[u8]) -> Result<Msg, ProtoError> {
             kind: r.u8()?,
         },
         TAG_VOTE => Msg::Vote { proposal: r.u16()?, option: r.u8()? },
+        TAG_TEAM => Msg::TeamClaim { team: r.u8()?, side: Side::from_u8(r.u8()?)? },
         TAG_SESSION_READY => Msg::SessionReady { total: r.u64()?, hash: r.u32()? },
         TAG_ORDERS => {
             let n = r.u8()? as usize;
@@ -872,6 +895,7 @@ mod tests {
             ("SESSION_OFFER", TAG_SESSION_OFFER),
             ("SESSION_CHUNK", TAG_SESSION_CHUNK),
             ("SESSION_READY", TAG_SESSION_READY),
+            ("TEAM", TAG_TEAM),
             ("CLOCK", TAG_CLOCK),
             ("CONTRACT", TAG_CONTRACT),
             ("VOTE", TAG_VOTE),
@@ -1151,6 +1175,54 @@ mod tests {
             Msg::Vote { proposal, option } => assert_eq!((proposal, option), (65535, 255)),
             other => panic!("expected Vote, got {other:?}"),
         }
+    }
+
+    /// A team claim has to survive the wire, or the two machines disagree about who holds what - which is
+    /// what "player 1 can take every team" looked like before claims crossed the network at all.
+    #[test]
+    fn a_team_claim_round_trips_for_every_team_and_a_release() {
+        for (team, side) in [(1u8, Side::Host), (10, Side::Host), (1, Side::Client), (0, Side::Client)] {
+            let msg = Msg::TeamClaim { team, side };
+            match decode(&encode(&msg)).unwrap() {
+                Msg::TeamClaim { team: t, side: s } => assert_eq!((t, s), (team, side)),
+                other => panic!("expected TeamClaim, got {other:?}"),
+            }
+        }
+    }
+
+    /// A team claim's payload is exactly `[TAG_TEAM, team, side]`, and an out-of-range side is refused.
+    ///
+    /// The layout is asserted so a field added to the struct cannot silently move the side byte and leave the
+    /// malformed-input case below testing nothing.
+    ///
+    /// The error is `BadTag(99)`, not `BadSide(99)`: `Side::from_u8` reports an unknown side through the same
+    /// variant it uses for an unknown message tag. That is a naming wart in existing code, not something this
+    /// feature should change, so the test pins what actually happens rather than what the names suggest.
+    #[test]
+    fn a_team_claim_is_three_bytes_and_an_invalid_side_is_refused() {
+        let frame = encode(&Msg::TeamClaim { team: 3, side: Side::Host });
+        assert_eq!(frame.len(), HEADER_LEN + 3, "tag + team + side");
+        assert_eq!(frame[HEADER_LEN], TAG_TEAM, "payload starts with the tag");
+        assert_eq!(frame[HEADER_LEN + 1], 3, "then the team id");
+        assert_eq!(frame[HEADER_LEN + 2], Side::Host.as_u8(), "then the side");
+
+        let mut bad = frame.clone();
+        bad[HEADER_LEN + 2] = 99;
+        bad = rechecksum(bad);
+        // The point is that it is *refused*; the variant is pinned so a change to it is visible.
+        assert!(decode(&bad).is_err(), "an unknown side must not decode: {:?}", decode(&bad));
+        assert!(matches!(decode(&bad), Err(ProtoError::BadTag(99))), "{:?}", decode(&bad));
+    }
+
+    /// Recomputes the header checksum after a test mutates a payload byte.
+    ///
+    /// The checksum is FNV-1a 32 of the payload at offset 10 - not a sum. Getting that wrong in the helper
+    /// makes the test fail for the wrong reason (`BadChecksum` rather than `BadSide`), which would look like a
+    /// codec bug.
+    fn rechecksum(mut frame: Vec<u8>) -> Vec<u8> {
+        let sum = fnv1a32(&frame[HEADER_LEN..]);
+        frame[10..14].copy_from_slice(&sum.to_le_bytes());
+        frame
     }
 
     #[test]

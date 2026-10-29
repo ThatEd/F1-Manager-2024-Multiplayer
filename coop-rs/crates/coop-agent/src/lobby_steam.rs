@@ -52,9 +52,27 @@ use crate::lobby_policy as policy;
 
 /// `k_iSteamFriendsCallbacks` base. `GameLobbyJoinRequested_t` is `base + 33`.
 ///
-/// The base is a fixed part of the Steamworks ABI and the `+33` offset is read from the struct in the shipped
-/// header text, not invented.
-const GAME_LOBBY_JOIN_REQUESTED: i32 = 3301 + 33;
+/// **The base is 300, not 3301.** `SteamConstants.cs` in Steamworks.NET, generated from Valve's own
+/// `steam_api_common.h`, declares the bases explicitly:
+///
+/// ```text
+/// k_iSteamUserCallbacks         = 100
+/// k_iSteamGameServerCallbacks   = 200
+/// k_iSteamFriendsCallbacks      = 300
+/// k_iSteamBillingCallbacks      = 400
+/// k_iSteamMatchmakingCallbacks  = 500
+/// ```
+///
+/// An earlier version of this file used `3301`, which made the constant `3334` - a callback id Steam never
+/// posts. `RegisterCallback` accepts an unknown id without complaint, so the mod registered successfully and
+/// then waited forever for an invite that had in fact arrived. That is why the value is now spelled out with
+/// its provenance and pinned by a test.
+const FRIENDS_CALLBACKS: i32 = 300;
+const GAME_LOBBY_JOIN_REQUESTED: i32 = FRIENDS_CALLBACKS + 33;
+
+/// `k_iSteamMatchmakingCallbacks` base. `LobbyCreated_t` is `base + 13`, `LobbyEnter_t` is `base + 4`.
+const MATCHMAKING_CALLBACKS: i32 = 500;
+const LOBBY_CREATED: i32 = MATCHMAKING_CALLBACKS + 13;
 
 type HSteamPipe = i32;
 type HSteamUser = i32;
@@ -93,16 +111,42 @@ mod ffi {
     ///
     /// A static because the callback fires on Steam's thread and must not allocate, lock, or touch Rust
     /// objects that could be mid-drop. An atomic integer is the only thing safe to write there.
-    static WANTED_LOBBY: AtomicU64 = AtomicU64::new(0);
+    /// Not private: the peek/take pair is asserted by a test, and a test that cannot set the value cannot
+    /// prove that peeking leaves it intact.
+    pub static WANTED_LOBBY: AtomicU64 = AtomicU64::new(0);
 
     /// Read-and-clear, so one request is acted on once.
     pub fn take_wanted_lobby() -> u64 {
         WANTED_LOBBY.swap(0, Ordering::SeqCst)
     }
 
-    unsafe extern "system" fn run(this: *mut CallbackObj, pv: *mut c_void) {
-        // `pv` points at the callback struct itself: the first field of `GameLobbyJoinRequested_t` is
-        // `m_steamIDLobby`, and Steam passes the whole struct. So the lobby id is the first 8 bytes.
+    /// Read without clearing, for status reporting.
+    ///
+    /// The host screen polls `GET /coop/lobby` to render its status line. That poll must not consume the
+    /// pending invite: the display would destroy the very thing it was about to show, and the `join` the
+    /// player triggers next would find an empty slot.
+    pub fn peek_wanted_lobby() -> u64 {
+        WANTED_LOBBY.load(Ordering::SeqCst)
+    }
+
+    /// The id of the lobby `CreateLobby` produced, once Steam has answered. `0` means "not answered yet".
+    ///
+    /// This is the whole reason a call-result registration exists here. `CreateLobby` returns a
+    /// `SteamAPICall_t` and nothing else, and Valve's docs for it say plainly: "Returns: SteamAPICall_t to be
+    /// used with a `LobbyCreated_t` call result." Without recording that result the host never learns its own
+    /// lobby id, so it cannot write the marker that makes the lobby joinable and has no id to put in an
+    /// invite. From outside, that is exactly "the lobby exists but invites do not work".
+    static CREATED_LOBBY: AtomicU64 = AtomicU64::new(0);
+
+    /// Read-and-clear, so one creation is adopted once and a later `create` is not attributed to it.
+    pub fn take_created_lobby() -> u64 {
+        CREATED_LOBBY.swap(0, Ordering::SeqCst)
+    }
+
+    /// `GameLobbyJoinRequested_t` - a plain **callback**, id `k_iSteamFriendsCallbacks + 33`.
+    ///
+    /// `pv` points at the struct itself, whose first field is `m_steamIDLobby`, so the id is the first 8 bytes.
+    unsafe extern "system" fn run(_this: *mut CallbackObj, pv: *mut c_void) {
         if pv.is_null() {
             return;
         }
@@ -110,25 +154,58 @@ mod ffi {
         if lobby != 0 {
             WANTED_LOBBY.store(lobby, Ordering::SeqCst);
         }
-        let _ = this;
     }
 
-    unsafe extern "system" fn run_result(_this: *mut CallbackObj, _pv: *mut c_void, _io: u8, _call: u64) {}
+    /// `LobbyCreated_t` - a **call result**, id `k_iSteamMatchmakingCallbacks + 13`.
+    ///
+    /// Call results arrive through the vtable's second slot, not the first: Steam calls
+    /// `Run(void*, bool bIOFailure, SteamAPICall_t)`. `bIOFailure` means Steam never got an answer, so the
+    /// payload must not be read - it is not a `LobbyCreated_t` in that case.
+    unsafe extern "system" fn run_created(
+        _this: *mut CallbackObj,
+        pv: *mut c_void,
+        io_failure: u8,
+        _call: u64,
+    ) {
+        if pv.is_null() || io_failure != 0 {
+            return;
+        }
+        // `LobbyCreated_t` is `{ EResult m_eResult; uint64 m_ulSteamIDLobby; }`. `EResult` is a 32-bit enum
+        // and the struct is 8-byte aligned, so the id sits at offset 8 of a 16-byte struct - the same
+        // padding rule that puts `m_steamIDLobby` at offset 16 in `FriendGameInfo_t`. A failed result leaves
+        // the id zero, so a non-zero read is the success test; the size and offset are pinned by a test.
+        let lobby = *((pv as *const u8).add(8) as *const u64);
+        if lobby != 0 {
+            CREATED_LOBBY.store(lobby, Ordering::SeqCst);
+        }
+    }
 
     unsafe extern "system" fn size(_this: *mut CallbackObj) -> i32 {
-        // sizeof(GameLobbyJoinRequested_t) = two 64-bit ids.
+        // sizeof(GameLobbyJoinRequested_t) = two 64-bit ids; sizeof(LobbyCreated_t) is also 16. Reporting the
+        // larger of the two would be indistinguishable here, so 16 is the honest single answer.
         16
     }
 
-    static VTABLE: CallbackVTable = CallbackVTable { run, run_result, size };
+    static JOIN_VTABLE: CallbackVTable = CallbackVTable { run, run_result: run_created, size };
+    static CREATED_VTABLE: CallbackVTable = CallbackVTable { run, run_result: run_created, size };
 
-    /// The one registered callback object. A static with a `'static` vtable, so its address is stable for the
-    /// lifetime of the process - which Steam requires, since it keeps the pointer.
+    /// The registered `GameLobbyJoinRequested_t` object. A static with a `'static` vtable, so its address is
+    /// stable for the lifetime of the process - which Steam requires, since it keeps the pointer.
     pub static mut JOIN_CALLBACK: CallbackObj = CallbackObj {
-        vtable: &VTABLE,
+        vtable: &JOIN_VTABLE,
         flags: 0,
         pad: [0; 3],
         callback_id: GAME_LOBBY_JOIN_REQUESTED,
+    };
+
+    /// The registered `LobbyCreated_t` call-result object. One per outstanding creation is the strictly
+    /// correct arrangement, but the host creates one lobby per host-tab visit and re-creates only after
+    /// leaving, so a single slot cannot lose an id that is still wanted.
+    pub static mut CREATED_CALLBACK: CallbackObj = CallbackObj {
+        vtable: &CREATED_VTABLE,
+        flags: 0,
+        pad: [0; 3],
+        callback_id: LOBBY_CREATED,
     };
 
     pub type CreateLobbyFn = unsafe extern "system" fn(*mut c_void, i32, i32) -> SteamAPICall;
@@ -143,6 +220,7 @@ mod ffi {
     pub type InviteUserFn = unsafe extern "system" fn(*mut c_void, u64, u64) -> u8;
     pub type ActivateInviteDialogFn = unsafe extern "system" fn(*mut c_void, u64);
     pub type RegisterCallbackFn = unsafe extern "system" fn(*mut CallbackObj, i32);
+    pub type RegisterCallResultFn = unsafe extern "system" fn(*mut CallbackObj, u64);
     pub type GetFriendGamePlayedFn = unsafe extern "system" fn(*mut c_void, u64, *mut u8) -> u8;
 
     /// Resolved function pointers. A plain struct of `Option<fn>`s, so a missing export degrades to a
@@ -162,6 +240,7 @@ mod ffi {
         pub invite_user: InviteUserFn,
         pub activate_invite_dialog: ActivateInviteDialogFn,
         pub register_callback: RegisterCallbackFn,
+        pub register_call_result: RegisterCallResultFn,
         pub friend_game_played: GetFriendGamePlayedFn,
     }
 
@@ -211,6 +290,7 @@ mod ffi {
                     invite_user: a.invite_user,
                     activate_invite_dialog: a.activate_invite_dialog,
                     register_callback: a.register_callback,
+                    register_call_result: a.register_call_result,
                     friend_game_played: a.friend_game_played,
                 });
             }
@@ -231,6 +311,7 @@ mod ffi {
                         invite_user: a.invite_user,
                         activate_invite_dialog: a.activate_invite_dialog,
                         register_callback: a.register_callback,
+                        register_call_result: a.register_call_result,
                         friend_game_played: a.friend_game_played,
                     });
                     Ok(CACHED.take().expect("just set"))
@@ -288,6 +369,7 @@ mod ffi {
                 "SteamAPI_ISteamFriends_ActivateGameOverlayInviteDialog",
             )?),
             register_callback: std::mem::transmute(must(module, "SteamAPI_RegisterCallback")?),
+            register_call_result: std::mem::transmute(must(module, "SteamAPI_RegisterCallResult")?),
             friend_game_played: std::mem::transmute(must(module, "SteamAPI_ISteamFriends_GetFriendGamePlayed")?),
         })
     }
@@ -314,18 +396,28 @@ mod ffi {
         }
     }
 
-    /// Creates a lobby and returns its id, or an error naming what Steam said.
+    /// Creates a lobby and returns the `SteamAPICall_t`, or `0` if the call could not be made.
     ///
-    /// `CreateLobby` is asynchronous, so the id cannot be read here. `0` after the call means "not known yet",
-    /// and the caller confirms with [`lobby_members`] on a later pass rather than pretending it worked.
+    /// The lobby *id* is not available yet - `CreateLobby` is asynchronous and Steam answers with a
+    /// `LobbyCreated_t` call result. **This registers that call result before returning**, so the answer cannot
+    /// be missed: a registration made after `CreateLobby` would race a reply that can arrive on the very next
+    /// callback pump. The id is then collected by [`take_created_lobby`] on a later pass, which is what the
+    /// caller polls.
+    ///
+    /// Registering first and calling second is the ordering that matters; the alternative - call, then
+    /// register - is the version that produced "the lobby exists but the mod does not know its id", and with it
+    /// a session no invite could point at.
     pub fn create(api: &Api, visibility: policy::ELobbyType, max_members: i32) -> u64 {
         unsafe {
             let call = (api.create_lobby)(api.matchmaking, visibility.as_i32(), max_members);
-            // The `SteamAPICall_t` is only useful with a call-result handler, which this module does not
-            // register. Recorded for the log; the lobby id is discovered by `owned_lobby` afterwards.
-            let _ = call;
+            // `RegisterCallResult` takes the object and then the *specific* call to watch, so the binding can
+            // only be made once a `SteamAPICall_t` exists - it cannot be hoisted to `attach`.
+            if call != 0 {
+                let obj: *mut CallbackObj = std::ptr::addr_of_mut!(CREATED_CALLBACK);
+                (api.register_call_result)(obj, call);
+            }
+            call
         }
-        0
     }
 
     /// The lobby id this process owns, if Steam says it is in one.
@@ -449,7 +541,8 @@ mod ffi {
 #[cfg(windows)]
 pub use ffi::{
     activate_invite_dialog, attach, create, friend_lobby, get_data, join, leave, member_at, members,
-    owned_lobby, register_join_callback, set_data, set_joinable, take_wanted_lobby, Api,
+    owned_lobby, peek_wanted_lobby, register_join_callback, set_data, set_joinable, take_created_lobby,
+    take_wanted_lobby, Api,
 };
 
 /// Non-Windows stubs, so the crate still builds (and its tests still run) elsewhere. Every call reports that
@@ -459,18 +552,79 @@ pub fn unavailable() -> Result<(), String> {
     Err("Steam lobbies are only available on Windows".into())
 }
 
+/// No call results arrive without Steam, so nothing is ever adopted.
+#[cfg(not(windows))]
+pub fn take_created_lobby() -> u64 {
+    0
+}
+
+/// No callback can fire without Steam.
+#[cfg(not(windows))]
+pub fn take_wanted_lobby() -> u64 {
+    0
+}
+
+/// No callback can fire without Steam, so nothing is ever pending.
+#[cfg(not(windows))]
+pub fn peek_wanted_lobby() -> u64 {
+    0
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
 
-    /// The callback id must equal the Friends base plus 33.
+    /// The callback id must equal the Friends base plus 33, and the base is **300**.
     ///
     /// Steam dispatches purely on this number: registering the right struct under the wrong id means the
     /// callback never fires, and - worse - registering a struct whose size does not match the id means Steam
     /// copies the wrong number of bytes into it.
+    ///
+    /// This test previously asserted `3301 + 33`, which is where the bug came from: it pinned the wrong
+    /// number, so it passed while every invite was silently dropped. The base now cites its source
+    /// (`SteamConstants.cs`, generated from Valve's `steam_api_common.h`) and both bases are asserted.
     #[test]
     fn the_join_request_callback_id_matches_the_documented_offset() {
-        assert_eq!(GAME_LOBBY_JOIN_REQUESTED, 3301 + 33);
+        assert_eq!(GAME_LOBBY_JOIN_REQUESTED, 300 + 33, "k_iSteamFriendsCallbacks is 300");
+        assert_eq!(GAME_LOBBY_JOIN_REQUESTED, 333);
+        // Matchmaking is the next hundred up; LobbyCreated_t is +13 from it.
+        assert_eq!(MATCHMAKING_CALLBACKS, 500, "k_iSteamMatchmakingCallbacks is 500");
+        assert_eq!(LOBBY_CREATED, 513);
+    }
+
+    /// `LobbyCreated_t` puts the lobby id at offset 8, which is what the call-result reader assumes.
+    ///
+    /// The struct is `{ EResult m_eResult; uint64 m_ulSteamIDLobby; }` - a 4-byte enum followed by an 8-byte
+    /// value, so the compiler inserts 4 bytes of padding and the id lands at 8 rather than at 4. Reading it at
+    /// offset 4 would return the low half of the id combined with the enum, i.e. a garbage lobby for every
+    /// invite. That is precisely the class of mistake the old `3301` base was, so it is now pinned the same way.
+    #[test]
+    fn the_lobby_created_payload_puts_the_lobby_id_at_offset_eight() {
+        #[repr(C)]
+        struct LobbyCreated {
+            result: i32,
+            lobby: u64,
+        }
+        assert_eq!(std::mem::size_of::<LobbyCreated>(), 16);
+        assert_eq!(std::mem::offset_of!(LobbyCreated, result), 0);
+        assert_eq!(std::mem::offset_of!(LobbyCreated, lobby), 8);
+    }
+
+    /// A pending invite must survive being looked at.
+    ///
+    /// The host screen polls `GET /coop/lobby`, which reports `pending_join`. If that reporting took the value,
+    /// the poll that displayed the invite would consume it and the `join` the player then triggers would find
+    /// nothing - an invite that appears and then cannot be accepted.
+    #[test]
+    fn peeking_a_pending_invite_does_not_consume_it() {
+        #[cfg(windows)]
+        {
+            ffi::WANTED_LOBBY.store(76561198000000042, std::sync::atomic::Ordering::SeqCst);
+            assert_eq!(peek_wanted_lobby(), 76561198000000042, "peek must report it");
+            assert_eq!(peek_wanted_lobby(), 76561198000000042, "and must not have cleared it");
+            assert_eq!(take_wanted_lobby(), 76561198000000042, "take removes it");
+            assert_eq!(peek_wanted_lobby(), 0, "after acting on it, nothing is pending");
+        }
     }
 
     #[test]

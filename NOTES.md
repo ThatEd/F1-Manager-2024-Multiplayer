@@ -1,4 +1,4 @@
-# F1 Manager 2024 â€” Co-op Anything notes
+﻿# F1 Manager 2024 — Co-op Anything notes
 
 ## Game identity (recorded 2026-10-26)
 - Install: `E:\Steam\steamapps\common\F1 Manager 2024`
@@ -14,32 +14,32 @@
 - No existing entry in `data/directory.yaml`
 - No existing write-up in `games/`
 
-## Phase 1: Research â€” complete (2026-10-26)
+## Phase 1: Research — complete (2026-10-26)
 Searched: this repo, GitHub repos+code, Nexus Mods (403 blocked), ModDB (404), Steam discussions, Reddit r/F1Manager, web search.
 Result: No co-op project exists for F1 Manager 2024.
 Added gap entry to data/directory.yaml (kind: gap, status: none, qa: none).
 Rebuilt DIRECTORY.md (313 entries).
 
 Existing UE4/5 co-op references on same engine:
-- Lies of P Co-op (Ember Wave) â€” playable, steam-relay, 2 players
-- Hogwarts Legacy Wandrealm â€” playable, dedicated-server, up to 512
-- CrabSync (Crab Champions) â€” playable, shared inventory
-- Half Sword Multiplayer Mod â€” prototype, steam-relay, up to 6
+- Lies of P Co-op (Ember Wave) — playable, steam-relay, 2 players
+- Hogwarts Legacy Wandrealm — playable, dedicated-server, up to 512
+- CrabSync (Crab Champions) — playable, shared inventory
+- Half Sword Multiplayer Mod — prototype, steam-relay, up to 6
 
-Active F1M24 modding scene: DatabaseEditor (save editor, v3.6.2), F1Manager2024Logger (telemetry), trainers, setup tools â€” no multiplayer work.
+Active F1M24 modding scene: DatabaseEditor (save editor, v3.6.2), F1Manager2024Logger (telemetry), trainers, setup tools — no multiplayer work.
 
-## Phase 2: Workspace â€” complete (2026-10-26)
+## Phase 2: Workspace — complete (2026-10-26)
 Test install copied to `local/f1-manager-2024/test-install` (isolated from owner's install).
 - UE4SS v3.0.1 already installed with 10 mods including SplitScreenMod and ConsoleEnablerMod
 - Engine: UE 5.1 (from UE4SS-settings.ini EngineVersionOverride)
-- Save location: `C:\Users\<you>\AppData\Local\F1Manager24\Saved\` (SaveGames, SaveGames2, SaveGames4, SaveGamesS)
-- Instance-local config created in test-install\F1Manager24\Saved\Config\Windows\ (Engine.ini, GameUserSettings.ini, Input.ini) â€” windowed 1280x720, VSync off
+- Save location: `%LOCALAPPDATA%\..\Local\F1Manager24\Saved\` (SaveGames, SaveGames2, SaveGames4, SaveGamesS)
+- Instance-local config created in test-install\F1Manager24\Saved\Config\Windows\ (Engine.ini, GameUserSettings.ini, Input.ini) — windowed 1280x720, VSync off
 - No anti-cheat detected
 
-## Phase 3: Understand â€” COMPLETE (2026-10-26)
+## Phase 3: Understand — COMPLETE (2026-10-26)
 
 ### CRITICAL REALIZATION: Cannot isolate Steam game
-- Steam games CANNOT be launched from an isolated copy â€” Steam always relaunches from owner's install
+- Steam games CANNOT be launched from an isolated copy — Steam always relaunches from owner's install
 - UE4SS cannot be tested in test-install because the exe triggers Steam to use owner's install
 - All live execution tracing must happen in the OWNER's install (E:\Steam\steamapps\common\F1 Manager 2024)
 - UE4SS is NOT installed in owner's install (no ue4ss.dll there)
@@ -48,35 +48,35 @@ Test install copied to `local/f1-manager-2024/test-install` (isolated from owner
 The save is GVAS wrapping zlib-compressed SQLite. Disassembled CSVs at `E:\Downloads\ThatFinnishGuy Save Viewer\Save data disassembled\`:
 
 **Race weekend tables (written after each session completes):**
-- `Races` â€” RaceID, SeasonID, Day, TrackID, State(0=Pending,1=InProgress,2=Complete), weather, weekend type
-- `Races_PracticeResults` â€” SeasonID, RaceID, PracticeSession, DriverID, TeamID, TimeOnTrack, SessionDuration, BestLapTime, BestLapTyre, LapCount
-- `Races_QualifyingResults` â€” SeasonID, RaceID, QualifyingStage, SprintShootout, FinishingPos, DriverID, TeamID, FastestLap, DNF, LapCount
-- `Races_SprintResults` â€” SeasonID, RaceID, FinishingPos, DriverID, TeamID
-- `Races_Results` â€” Season, RaceID, FinishingPos, DriverID, TeamID, Laps, Time, FastestLap, Points, DNF, overtakes, etc.
-- `Races_PitStopTimings` â€” SeasonID, RaceID, TeamID, DriverID, PitStopID, PitStopStage, Duration, IncidentDelay, Lap
-- `Races_PitStopResults` â€” SeasonID, RaceID, TeamID, FinishPosition, FastestPitStopTime, DriverID, Points
-- `Races_DriverStandings` / `Races_TeamStandings` â€” SeasonID, ID, Points, Position
-- `Races_Tracks` â€” TrackID, Name, Laps, TrackLength, SafetyCarChance, etc.
-- `Save_RaceSimManager` â€” CarIndex, Active, Fuel, EngineTemperature, BrakeTemperature, RacePosition, TotalRaceTime, LapCount, DRSState, etc.
-- `Save_RaceSimCars` â€” CarIndex, PitStopState, PitStopStartTime, various pit stop stage times
-- `Save_RaceSimCars_Overtake` â€” CarIndex, OvertakeActive, DefenderCar, AttackerInitialLine, etc.
+- `Races` — RaceID, SeasonID, Day, TrackID, State(0=Pending,1=InProgress,2=Complete), weather, weekend type
+- `Races_PracticeResults` — SeasonID, RaceID, PracticeSession, DriverID, TeamID, TimeOnTrack, SessionDuration, BestLapTime, BestLapTyre, LapCount
+- `Races_QualifyingResults` — SeasonID, RaceID, QualifyingStage, SprintShootout, FinishingPos, DriverID, TeamID, FastestLap, DNF, LapCount
+- `Races_SprintResults` — SeasonID, RaceID, FinishingPos, DriverID, TeamID
+- `Races_Results` — Season, RaceID, FinishingPos, DriverID, TeamID, Laps, Time, FastestLap, Points, DNF, overtakes, etc.
+- `Races_PitStopTimings` — SeasonID, RaceID, TeamID, DriverID, PitStopID, PitStopStage, Duration, IncidentDelay, Lap
+- `Races_PitStopResults` — SeasonID, RaceID, TeamID, FinishPosition, FastestPitStopTime, DriverID, Points
+- `Races_DriverStandings` / `Races_TeamStandings` — SeasonID, ID, Points, Position
+- `Races_Tracks` — TrackID, Name, Laps, TrackLength, SafetyCarChance, etc.
+- `Save_RaceSimManager` — CarIndex, Active, Fuel, EngineTemperature, BrakeTemperature, RacePosition, TotalRaceTime, LapCount, DRSState, etc.
+- `Save_RaceSimCars` — CarIndex, PitStopState, PitStopStartTime, various pit stop stage times
+- `Save_RaceSimCars_Overtake` — CarIndex, OvertakeActive, DefenderCar, AttackerInitialLine, etc.
 
 **Management tables (between sessions):**
-- `Staff_DriverData` â€” driver stats, contracts, marketability
-- `Staff_Contracts` â€” driver contracts, salary, end season
-- `Finance_TeamBalance` / `Finance_Transactions` â€” team money
-- `Parts_Designs` / `Parts_Projects` / `Parts_Items` â€” car part development
-- `Teams` â€” team info, colors, location
-- `Player` / `Player_History` / `Player_Record` â€” player career data
+- `Staff_DriverData` — driver stats, contracts, marketability
+- `Staff_Contracts` — driver contracts, salary, end season
+- `Finance_TeamBalance` / `Finance_Transactions` — team money
+- `Parts_Designs` / `Parts_Projects` / `Parts_Items` — car part development
+- `Teams` — team info, colors, location
+- `Player` / `Player_History` / `Player_Record` — player career data
 
 **Race weekend flow (from save data):**
-Practice (1-3 sessions) â†’ Qualifying â†’ (optional Sprint) â†’ Race â†’ Post-race standings update
+Practice (1-3 sessions) → Qualifying → (optional Sprint) → Race → Post-race standings update
 Each session writes its results to the corresponding table when complete.
 
 **CRITICAL LIMITATION**: Static dumps tell us WHAT data exists but NOT when each table is written during live gameplay.
 
-### What we NEED to understand (live execution â€” must be done in owner's install)
-1. **Race weekend flow**: What UFunctions fire when practice â†’ quali â†’ race â†’ post-race?
+### What we NEED to understand (live execution — must be done in owner's install)
+1. **Race weekend flow**: What UFunctions fire when practice → quali → race → post-race?
 2. **Live data generation**: Is race sim data computed live or pre-baked?
 3. **Save timing**: When exactly does the game write saves between sessions?
 4. **Netcode**: Any client/server architecture, or purely single-player?
@@ -85,28 +85,28 @@ Each session writes its results to the corresponding table when complete.
 ### UE4SS status
 - UE4SS v3.0.1 installed in test-install (dwmapi.dll + UE4SS.dll) but CANNOT be tested there
 - CoopDiagMod created but cannot run without UE4SS in owner's install
-- Owner's install has NO UE4SS â€” would need to install it there (touches owner's install)
+- Owner's install has NO UE4SS — would need to install it there (touches owner's install)
 
 ### Co-op architecture assessment
-- **No netcode exists** â€” single-player management sim
+- **No netcode exists** — single-player management sim
 - **UE4SS Lua hooks available** IF installed in owner's install
-- **Save sync between sessions** â€” patch saves at race weekend boundaries (weak co-op)
-- **Race session sync** â€” main technical challenge; need to sync race sim state between players
+- **Save sync between sessions** — patch saves at race weekend boundaries (weak co-op)
+- **Race session sync** — main technical challenge; need to sync race sim state between players
 - **Approach**: UE4SS mod that hooks race start/end, patches saves between sessions, syncs race results via network
 
 ### Next step
-Phase 4: Choose â€” design co-op architecture and networking model. Live UE4SS tracing requires installing UE4SS in owner's install (needs owner permission).
+Phase 4: Choose — design co-op architecture and networking model. Live UE4SS tracing requires installing UE4SS in owner's install (needs owner permission).
 
-## CORRECTIONS â€” 2026-10-26 (supersedes the wrong claims in the Phase 3 section above)
+## CORRECTIONS — 2026-10-26 (supersedes the wrong claims in the Phase 3 section above)
 
 ### Retracted claims
-1. "Correct UFunction names unknown" â€” FALSE. They are in the FModel Blueprint JSON `FuncMap`:
+1. "Correct UFunction names unknown" — FALSE. They are in the FModel Blueprint JSON `FuncMap`:
    - `/Game/RaceSim/BP_RaceSimNotificationsManager.BP_RaceSimNotificationsManager_C:RaceSimEventReceived` (param `i_event`, a `RaceSimEvent`)
    - `/Game/RaceSim/RaceSimChroma.RaceSimChroma_C:RaceSimEventRecieved` (sic, "Recieved"), plus PlayRedFlagAnims / PlayYellowFlagAnims / PlayCqFlagAnims / PlaySwooshAnims / OnSwooshStart / OnSwooshStop
    - `/Game/RaceSim/FullScreenMap/CarIconWidget.CarIconWidget_C:` SetWidgetData / OnRacePosChanged / OnSetCarWidgetData / OnSelectedChanged / OnMinimalChanged / PreConstruct
-2. "RaceSimDataAsset holds Races_Results, Staff_DriverData, Finance_TeamBalance, Parts_Designs, Player_History" â€” FALSE. RaceSimDataAsset.json contains only sim tuning (tyre wear thresholds, driver accuracy, lift-and-coast, etc.). Those table names came from the save file's SQLite DB. Two sources were conflated.
-3. "All RegisterHook guesses failed" â€” wrong conclusion. The 4 failures in the 02:40:35 run were hooks registered at mod-load time, before the race Blueprint classes existed. The session then ran until 03:04 without crashing.
-4. "Use native hooks, never RegisterHook" â€” contradicted by the evidence. RegisterHook works; the timing was wrong.
+2. "RaceSimDataAsset holds Races_Results, Staff_DriverData, Finance_TeamBalance, Parts_Designs, Player_History" — FALSE. RaceSimDataAsset.json contains only sim tuning (tyre wear thresholds, driver accuracy, lift-and-coast, etc.). Those table names came from the save file's SQLite DB. Two sources were conflated.
+3. "All RegisterHook guesses failed" — wrong conclusion. The 4 failures in the 02:40:35 run were hooks registered at mod-load time, before the race Blueprint classes existed. The session then ran until 03:04 without crashing.
+4. "Use native hooks, never RegisterHook" — contradicted by the evidence. RegisterHook works; the timing was wrong.
 
 ### Verified working (v14 log)
 - `RaceSimEventReceived` hooked and FIRED 100+ times during a race; first firing 03:18:22, 100th at 03:19:43.
@@ -125,11 +125,11 @@ Phase 4: Choose â€” design co-op architecture and networking model. Live UE
 - v16 source kept at `local/f1-manager-2024/CoopDiagMod_v16.lua`, copied into the game folder.
 
 ### Still unverified
-- Memory offsets from the PitWallAI/FormationLap notes (0x9A, 0x88, 0x99AF1C, CAR_BASE 0x95BC00, stride 0x10D8) â€” v16 deliberately does NOT read/write memory; it only reports property offsets via the reflected API so they can be compared.
+- Memory offsets from the PitWallAI/FormationLap notes (0x9A, 0x88, 0x99AF1C, CAR_BASE 0x95BC00, stride 0x10D8) — v16 deliberately does NOT read/write memory; it only reports property offsets via the reflected API so they can be compared.
 - Save timing and save format claims.
 - Whether the offsets match this build.
 
-## CoopDiagMod version history â€” lessons (2026-10-26)
+## CoopDiagMod version history — lessons (2026-10-26)
 
 | Version | Outcome | Defect |
 |---|---|---|
@@ -143,15 +143,15 @@ Phase 4: Choose â€” design co-op architecture and networking model. Live UE
 
 ### Rules that came out of this
 1. Never register hooks only at mod load. Race Blueprint classes are not loaded yet.
-2. Keep object-creation triggers (GameModeBase / PlayerController) â€” they are what actually worked.
+2. Keep object-creation triggers (GameModeBase / PlayerController) — they are what actually worked.
 3. Do not let a retry depend on the hook it is trying to register.
 4. Retry more than once: CarIconWidget_C was absent at 03:18:07 and present at 03:18:33.
-5. Hook callbacks are (self, ...) â€” never named params after self.
+5. Hook callbacks are (self, ...) — never named params after self.
 6. tostring(nil) is the string "nil"; check for nil before formatting.
 7. print() in UE4SS adds no newline.
 8. Offsets from a third-party write-up are unverified for this build; only trust values read back through the reflected API.
 
-## v16.1 race test with red-flag restart â€” 2026-10-26 04:02:39-04:06:39 (log verified)
+## v16.1 race test with red-flag restart — 2026-10-26 04:02:39-04:06:39 (log verified)
 
 ### What the run shows
 - 1200 RaceSimEvent events, 67 distinct m_type values, fully accounted (sum = 1200).
@@ -185,7 +185,7 @@ This is the first independent confirmation of FormationLap's event-ID table agai
 | Time scale live | Not called yet. RaceSimManager:GetPlaybackRate exists. |
 | Team commands game->client | Not started. |
 
-## CoopDiagMod v17 â€” read-only call-convention probe (deployed 2026-10-26)
+## CoopDiagMod v17 — read-only call-convention probe (deployed 2026-10-26)
 
 v16.1 is preserved at `local/f1-manager-2024/CoopDiagMod_v16.1_backup.lua` (15465 bytes,
 sha256 DC151D22...). v17 source lives in `local/` and is deployed to the owner install.
@@ -197,11 +197,11 @@ native UFunction from UE4SS Lua on this build", which we do not know. So v17 pro
 read-only, while keeping the proven event capture running.
 
 ### Offline check toolchain (no Lua interpreter exists on this machine)
-- `luasyntax.py` â€” real Lua grammar via the already-installed tree_sitter_lua package.
+- `luasyntax.py` — real Lua grammar via the already-installed tree_sitter_lua package.
   Validated: v16.1 and v17 parse with zero ERROR nodes; a deliberately broken file is rejected.
-- `luaglobals.py` â€” names used but never declared. Validated: catches `discovered` (the v12
+- `luaglobals.py` — names used but never declared. Validated: catches `discovered` (the v12
   crash) and undefined calls; v16.1 and v17 both report clean.
-- `luacheck_structural.py` â€” block/vararg balance, string.format arg counts,
+- `luacheck_structural.py` — block/vararg balance, string.format arg counts,
   local-function use-before-definition, and that every string we grep the log for is printed.
 Result: v17 PASS on all three.
 What these cannot catch: wrong UE4SS API signatures, and runtime errors from a valid-looking
@@ -1183,7 +1183,7 @@ RcClock 0xA0458C, plus per-car Lap 0x7E4 / LapT 0x7E8 / Dist 0x194).
 2. Test install confirmed to have UE4SS (dwmapi.dll, UE4SS-settings.ini, Mods/CoopDiagMod, its own
    UE4SS.log) and CoopDiagMod enabled in Mods/mods.txt.
 3. Sandboxie-Plus present at local/tools/Sandboxie-Plus (Start.exe, SandMan.exe). Existing sandboxes:
-   DefaultBox, Steam, Steem under C:\Sandbox\<you>.
+   DefaultBox, Steam, Steem under <sandbox>.
 
 ### v27 design: same mod, role from a file
   owner install  Mods/CoopDiagMod/Scripts/coop_role.txt = "host"
@@ -1214,7 +1214,7 @@ reads) would land in the overlay and is deliberately not attempted yet; it would
 OpenFilePath exception for the shared folder.
 
 Consequence for diagnosis: the CLIENT's UE4SS.log is itself redirected into the sandbox, so it will
-appear under something like C:\Sandbox\<you>\<box>\drive\E\Downloads\...\test-install\... rather
+appear under something like <sandbox>\<box>\drive\E\Downloads\...\test-install\... rather
 than next to the install.
 
 ### Success criterion, and how to read it
@@ -1644,7 +1644,7 @@ an injected DLL cannot see the injector's environment.
 
 ### Client install
 
-`\\<client-pc>\e\SteamLibrary\...\Win64` is **read-only** for this machine: the write probe is
+`\\<client>\e\SteamLibrary\...\Win64` is **read-only** for this machine: the write probe is
 denied even though the NTFS ACL grants `Authenticated Users: Modify`, so the share itself is
 read-only. Nothing was written there. Binaries are staged in `local/f1-manager-2024/client-package/`
 with `INSTALL.md`. Two-machine addresses: this machine `192.168.1.101`, client `192.168.1.100`.
@@ -2117,7 +2117,7 @@ copying by hand, no debugger.
 
 ### What ran
 
-| time | host (192.168.1.101) | other PC (<client-pc>, 192.168.1.100) |
+| time | host (192.168.1.101) | other PC (<client-host>, 192.168.1.100) |
 |---|---|---|
 | 18:37:37 | `Load save2` queued | ? |
 | 18:37:49 | `page=RaceWeekend` | (not running yet) |
@@ -2152,7 +2152,7 @@ The viewer is for *reading* saves; the actual files live in
 ### Remote control of the second machine (new)
 
 `tools/remote.py` runs code on that PC over the SMB share, because it has no SSH, no WinRM and no open
-coop port ? but `\\<client-pc>\e` is **writable**.
+coop port ? but `\\<client>\e` is **writable**.
 
 ```
 req\<id>.cmd  -> agent executes in a child PowerShell
@@ -2279,7 +2279,7 @@ the calling convention - the target address was simply not encodable in the byte
 both consistent with executing garbage in unmapped memory.
 
 Fixed by `alloc_near()`: walk outward from the target in allocation-granularity strides asking for
-specific addresses, and verify each grant is inside Â±2 GB before using it. Verified on the real
+specific addresses, and verify each grant is inside ±2 GB before using it. Verified on the real
 allocator in a unit test:
 
 ```
@@ -2562,7 +2562,7 @@ write.
 - `Msg::Rc` is sent and applied, but **not yet tested in a live red flag** - the share went down before
   redeploying to the client.
 - Tyres are a `FIELDS` change, not yet done.
-- Damage needs the event bus (`ERaceSimEventType`), the bigger job, per RACESIM-HIJACK Â§5.2.
+- Damage needs the event bus (`ERaceSimEventType`), the bigger job, per RACESIM-HIJACK §5.2.
 - The publisher's `read_cars` (one 10.5 MB read) has been seen to fail with `ERROR_PARTIAL_COPY`
   mid-session. `read_rc` reads its 6 bytes individually for that reason; `read_cars` still needs the
   same treatment or an intermittent loss of snapshots.
@@ -2696,7 +2696,7 @@ Three beliefs the project held were wrong, and the export corrects them:
 
 | believed | actually |
 |---|---|
-| damage needs the event bus (RACESIM-HIJACK Â§5.2) | `Save_RaceSimCars_Parts` has **six named damage levels**: Body, FrontWing, RearWing, SidePods, Floor, Suspension |
+| damage needs the event bus (RACESIM-HIJACK §5.2) | `Save_RaceSimCars_Parts` has **six named damage levels**: Body, FrontWing, RearWing, SidePods, Floor, Suspension |
 | the sim has no clock to anchor on | `Save_RaceSimManager.SimTime` is persisted - time is the game's own anchor |
 | `race_pos` is derived and must not travel | `Save_RaceSimCars.RacePosition` is persisted, so it is state |
 
@@ -2714,7 +2714,7 @@ MaxSubstepDeltaTime=0.016667
 ```
 
 **No fixed timestep.** Each machine integrates a variable wall-clock delta, so two sims are never at the
-same step. Combined with the frozen `race_time` (Â§ below), that is why 1.88 M field writes in one session
+same step. Combined with the frozen `race_time` (§ below), that is why 1.88 M field writes in one session
 still left the client 62 km off: the writes landed and the sim integrated past them.
 
 Measured live during the race:
@@ -3151,3 +3151,60 @@ unlike `steam_display` - which is why the presence work uses `status`.
 One more string-scan trap: `+connect_lobby` is absent from the built DLL as a contiguous literal while
 `/coop/connectlobby` from the same function is present, so the literal is encoded as integer immediates. A byte
 scan cannot prove or disprove it; the 12 parser tests are the evidence.
+
+### 2026-10-29 - Two reported bugs that had been "fixed" before: teams and Steam invites
+
+The report was: "Old fixed bugs are still here too with player 1 being able to take every team and locking
+them". Both halves were true, and the source of each was a test or a constant that encoded the bug.
+
+#### Team claims: string keys compared to a number
+
+`pickTeam` released the previous claim with `if (k !== this.state.myTeam)`. Object keys are always strings and
+`myTeam` is a number, so `"1" !== 1` was true for every key: nothing was ever released and each click *added* a
+team. A host that clicked through the grid held all ten, and `takenByOther` then greyed out every one of them
+for the other player. Reproduced with the extracted function before changing it - 10 claims held, 0 released.
+
+Fixed by releasing on role (`who !== role next[k] = who`), which is the same rule the agent already applied in
+`claim_team`. `tools/headless/team_claim_test.js` extracts the real `pickTeam` body from `lobby.js` rather than
+copying the logic, so it cannot pass against a source that has regressed. Planting the old comparison fails 3
+of its 12 checks.
+
+**The second half: claims were process-local.** `/coop/claim` wrote a `Vec<(String, String)>` inside one agent
+and nothing ever put it on the wire. Even with the compare fixed, each machine saw only its own player's claim,
+so both could take the same team. Added `Msg::TeamClaim { team, side }` (protocol 2 -> 3), sent from
+`/coop/claim` and `/coop/release`, adopted on arrival by `adopt_remote_claim`. `agent_coord_e2e.js` now proves a
+claim crosses a real supervisor; removing the decode arm fails 2 of its 21 checks.
+
+#### Steam invites: the constant was wrong, and the test pinned it
+
+`GAME_LOBBY_JOIN_REQUESTED` was `3301 + 33`. `k_iSteamFriendsCallbacks` is **300** (`SteamConstants.cs`,
+generated from Valve's `steam_api_common.h`), so the id is **333**, and 3334 was a callback Steam never posts.
+`RegisterCallback` accepts an unknown id without complaint, so registration "succeeded" and the callback never
+fired. The unit test asserted `3301 + 33`, which is exactly why nobody caught it: it pinned the bug.
+
+Two more, both fatal on their own:
+- `create()` discarded the `SteamAPICall_t` and returned `0`, so `LOBBY` stayed `(Waiting, 0)` forever: no id,
+  no marker, no `SetLobbyJoinable`, no invite target. Now `RegisterCallResult(obj, call)` on the specific call
+  and `lobby_set` adopts `take_created_lobby()` on the next pass.
+- `lobby_join` with no arguments answered `"give lobby=<id> or friend=<steamid64>"` - but no arguments is
+  *normal*, it is what the front-end sends after a Join Game click. And `GET /coop/lobby` reported
+  `pending_join` via `take_wanted_lobby()`, so the host tab's own status poll consumed the invite it displayed.
+  Split into `peek_wanted_lobby` (report) and `take_wanted_lobby` (act).
+
+Also added `POST /coop/lobby/invite` + an "Invite a friend" button: `ActivateGameOverlayInviteDialog` was bound
+but never called, so there was no way to send an invite by hand either. It refuses when there is no lobby id
+instead of opening a dialog for a lobby Steam has never heard of.
+
+#### The "client is unreachable" conclusion was wrong, twice
+
+The LAN had moved from `192.168.1.x` to `10.32.231.x` and back. A hostname lookup and a ping to one remembered
+IP both failed, and that was reported as "the client is not up on this network" - it was up the whole time at
+`192.168.1.100`, reachable, Windows 11, 4 days uptime. `remote.py` now tries several candidate addresses
+instead of trusting one. **A single failed name lookup is not evidence a machine is off.**
+
+When the client was finally reached it had a stale agent (428,544 bytes vs 508,928) and **no pak installed**,
+so it had been running without the multiplayer tile. Both are now deployed and hash-matched.
+
+Tests: Rust 235 (was 231: +2 Steam constants, +2 layout, +2 team claim in proto... see suite output), JS
+`teams` 12/12 new, `e2e` 21/21 (was 16), `menu_test` 36/36 (invite button asserted). Full bundle: all 11 suites
+OK. Nothing has yet been run against a live Steam client, so invites remain the one thing this cannot prove.

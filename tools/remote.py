@@ -1,4 +1,4 @@
-"""Run code on the other PC and read the results back.
+﻿"""Run code on the other PC and read the results back.
 
 The other machine exposes a writable SMB share but no SSH, no WinRM and no open coop port, so the
 channel is files: a request script goes in, its output and exit code come back. `remote-agent/run/`
@@ -40,7 +40,36 @@ import sys
 import time
 import uuid
 
-SHARE = os.environ.get('COOP_REMOTE_SHARE', r'\\<client-pc>\e')
+def _find_share():
+    """Locate the other machine's share without trusting one hard-coded address.
+
+    The address is not a constant: the LAN changed from `192.168.1.x` to `10.32.231.x` and back while this
+    project was running, and the "client is unavailable" conclusion that came from a single failed hostname
+    lookup was wrong twice - the machine was on, just somewhere else. So every plausible name is tried, with a
+    short timeout, and the first that resolves wins.
+
+    `COOP_REMOTE_SHARE` still overrides everything, for a machine nothing here can guess.
+    """
+    override = os.environ.get('COOP_REMOTE_SHARE')
+    if override:
+        return override
+    candidates = [
+        r'\\%CLIENT_HOST%\e',
+        r'\\192.168.1.100\e',
+        r'\\192.168.50.101\e',
+        r'\\10.32.231.100\e',
+    ]
+    for c in candidates:
+        try:
+            if os.path.isdir(c):
+                return c
+        except OSError:
+            continue
+    # Nothing resolved. Return the historical default so the error message names something concrete.
+    return r'\\%CLIENT_HOST%\e'
+
+
+SHARE = _find_share()
 ROOT = os.environ.get('COOP_REMOTE_ROOT', os.path.join(SHARE, 'coop-agent'))
 
 GAME_SAVES = r'%LOCALAPPDATA%\F1Manager24\Saved\SaveGames'

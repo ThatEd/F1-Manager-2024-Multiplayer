@@ -111,9 +111,9 @@ looked in the wrong file and failed, which is why it now names its subject).
 
 ## What is still unverified, and why it matters here
 
-1. **That a lobby appears and is joinable.** `CreateLobby` is asynchronous and returns a `SteamAPICall_t`; this
-   module deliberately does not register call-result handlers, so it acts optimistically and confirms with the
-   synchronous getters. Whether Steam actually creates the lobby needs a live Steam client.
+1. **That a lobby appears and is joinable.** `CreateLobby` is asynchronous and returns a `SteamAPICall_t`.
+   `create()` now registers a `LobbyCreated_t` call result for that specific call and records the id, so the
+   host does learn it - but whether Steam actually creates the lobby still needs a live Steam client.
 2. **That the host learns its own lobby id.** `owned_lobby()` confirms by asking `GetLobbyOwner` and comparing
    with the local user, which works without a call-result handler but requires knowing the local SteamID.
    `unknown` until run.
@@ -125,6 +125,29 @@ looked in the wrong file and failed, which is why it now names its subject).
 5. **Publisher registration.** Lobbies need no rich-presence localisation tokens, which is why this path was
    chosen over `steam_display`. That much is a genuine advantage over the presence work: nothing here depends
    on a publisher-registered tag.
+
+## Three bugs that made invites impossible, found after the first "invites do not work" report
+
+All three are fixed. Recording them because each one *looked* like a Steam problem from the outside.
+
+1. **The callback id was wrong.** `GAME_LOBBY_JOIN_REQUESTED` was written as `3301 + 33`, i.e. `3334`.
+   `k_iSteamFriendsCallbacks` is **300**, not 3301 (`SteamConstants.cs`, generated from Valve's
+   `steam_api_common.h`), so the real id is **333**. `RegisterCallback` accepts an unknown id silently, so the
+   mod registered "successfully" and then waited forever for an invite that had already arrived. The unit test
+   asserted `3301 + 33` - it pinned the bug, which is why it never caught it.
+2. **No lobby id was ever obtained.** `create()` discarded the `SteamAPICall_t` and returned `0`, so `LOBBY`
+   stayed `(Waiting, 0)`. With no id, the metadata marker was never written, `SetLobbyJoinable` was never
+   called, and there was no id to put in an invite. Now `create()` calls `RegisterCallResult` for the specific
+   call and `lobby_set` adopts the id from `take_created_lobby()` on the next pass.
+3. **The invite path refused the normal case.** `lobby_join` with no arguments returned
+   `"give lobby=<id> or friend=<steamid64>"` - but no arguments *is* what the front-end sends after a player
+   clicks Join Game, because the id arrives on the callback. Separately, `GET /coop/lobby` reported
+   `pending_join` with `take_wanted_lobby()`, so the host tab's status poll *consumed* the invite it was
+   displaying. It now uses `peek_wanted_lobby()` and only `lobby_join` clears it.
+
+There was also nothing that opened Steam's invite dialog: `ActivateGameOverlayInviteDialog` was bound but never
+called, so an invite could not be sent by hand either. `POST /coop/lobby/invite` and an "Invite a friend" button
+on the host tab now do that, and refuse when there is no lobby id rather than opening a dialog that cannot work.
 
 ## Deliberately not done
 

@@ -23,7 +23,8 @@ launched with this code. Everything below reflects what has been *run*, not what
 | One contract per person per day | **Code complete, unrun.** Arbitration tested in the supervisor, never exercised by two live clients | [docs/COORDINATION.md](docs/COORDINATION.md) |
 | Regulation votes counted for both | **Code complete, unrun.** Vote box tested; no live vote has been cast | [docs/COORDINATION.md](docs/COORDINATION.md) |
 | Team retarget (play as different teams) | **Code complete, unrun.** `SetPlayerTeam` + the AI gate located; written, not executed against a career | [docs/TEAM-RETARGET.md](docs/TEAM-RETARGET.md) |
-| Steam "Join Game" | **Code complete, unrun.** Lobby create/join/`+connect_lobby` implemented; needs a live Steam client | [docs/STEAM-JOIN.md](docs/STEAM-JOIN.md) |
+| Steam "Join Game" | **Code complete, unrun.** Lobby create/join/`+connect_lobby` implemented; three bugs that made it impossible are fixed (callback id `3334` -> `333`, lobby id never adopted, invite path refused a real invite). Needs a live Steam client | [docs/STEAM-JOIN.md](docs/STEAM-JOIN.md) |
+| Team picker (one team each) | **Fixed and unit-tested.** A host could take all ten teams and lock the other player out: object keys are strings, `myTeam` is a number, so no claim was ever released. Claims also now cross the relay instead of staying in one process | `tools/headless/team_claim_test.js`, `python -I run_all_tests.py teams e2e` |
 | Rich presence | **Code complete, unrun.** `status` key path avoids the publisher-token problem of `steam_display` | [docs/RICH-PRESENCE.md](docs/RICH-PRESENCE.md) |
 
 **What "unrun" means here:** unit tests pass, the code compiles, and the design is written down — but
@@ -39,12 +40,13 @@ Nothing here needs the game. Python 3.10+, Node 16+ and a Rust toolchain are eno
 
 ```bash
 python -I run_all_tests.py          # every suite; prints ALL OK
-python -I run_all_tests.py rust     # 231 Rust tests
-python -I run_all_tests.py e2e      # two real agents through a real supervisor
+python -I run_all_tests.py rust     # 235 Rust tests
+python -I run_all_tests.py e2e      # two real agents through a real supervisor, 21 assertions
+python -I run_all_tests.py teams    # one player cannot take every team
 python -I run_all_tests.py redaction   # no private identifiers in the tree
 ```
 
-Currently: **231 Rust tests, 196 JS assertions across 8 suites**, plus a publishability check that fails
+Currently: **235 Rust tests, 208 JS assertions across 10 suites**, plus a publishability check that fails
 if a private path has leaked into the tree. All of it passes from a clean clone.
 
 Verified by cloning the published repo into an empty directory and running it there: `ALL OK (3 skipped:

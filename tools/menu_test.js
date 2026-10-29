@@ -666,6 +666,7 @@ async function runAsync() {
             ok(labels.indexOf("New career") >= 0, "a New career action is present", labels.join(","));
             ok(labels.indexOf("Load save") >= 0, "a Load save action is present", labels.join(","));
             ok(labels.indexOf("Host") >= 0 && labels.indexOf("Join") >= 0, "Host and Join are present", labels.join(","));
+            ok(labels.indexOf("Invite a friend") >= 0, "there is a control that sends a Steam invite", labels.join(","));
         }
     }
 

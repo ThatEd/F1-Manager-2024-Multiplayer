@@ -91,6 +91,16 @@ if shutil.which("cargo"):
         lambda out: "test result: FAILED" not in out and passed_count(out, 200),
     )
 
+# ---- Publishability ----------------------------------------------------------------------------
+# Checks the tree for private identifiers (local paths with a username, hostnames, real names, tokens).
+# Registered as a suite because the README told readers to run `redaction` and the runner had no such
+# name - so the check existed, was documented, and could not be run.
+if shutil.which("python") or shutil.which("py"):
+    # The tool's contract is its exit code plus a "no private identifiers remain" line; counting
+    # "passed" lines (as the other suites do) does not apply here.
+    suite("redaction", [sys.executable, os.path.join(TOOLS, "redact_private.py"), "--check"], HERE,
+          lambda out: "no private identifiers remain" in out)
+
 if shutil.which("node"):
     # ---- JS: unit + shipping-module tests ----------------------------------------------------
     suite("unit", ["node", "run_tests.js"], HEADLESS, lambda out: passed_count(out, 40))
@@ -111,6 +121,10 @@ if shutil.which("node"):
     # button failed: every other check asked "was the pak built from the right files", none asked "will the
     # game find them", and a pak with bare entry paths loads and overrides nothing.
     suite("pak", ["node", "pak_paths_test.js"], HEADLESS, lambda out: passed_count(out, 8))
+    # One player must not be able to take every team. Reported as "player 1 being able to take every team and
+    # locking them", caused by comparing a string object key against a number - always unequal, so no claim
+    # was ever released. This extracts and runs the real `pickTeam` body, so a copy cannot drift from the source.
+    suite("teams", ["node", "team_claim_test.js"], HEADLESS, lambda out: passed_count(out, 10))
 
     # ---- JS: end-to-end against a real supervisor process ------------------------------------
     # Needs the built supervisor binary. `cargo build --release` produces it; the runner builds it
@@ -118,7 +132,7 @@ if shutil.which("node"):
     # exchange coordination frames and a clone should not silently lose that coverage.
     supervisor = os.path.join(os.environ.get("CARGO_TARGET_DIR", os.path.join(HERE, "coop-rs", "target")),
                               "release", "coop-supervisor.exe")
-    suite("e2e", ["node", "agent_coord_e2e.js"], HEADLESS, lambda out: passed_count(out, 12),
+    suite("e2e", ["node", "agent_coord_e2e.js"], HEADLESS, lambda out: passed_count(out, 20),
           needs=None if os.path.exists(supervisor) else "build")
 
 
