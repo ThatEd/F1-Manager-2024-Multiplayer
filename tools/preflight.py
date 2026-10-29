@@ -436,7 +436,8 @@ def main():
 
     relay = listening(RELAY_PORT, local_only=False)
     c.add(relay is not None, 'relay listening on %d' % RELAY_PORT,
-          ('pid %s' % relay) if relay else 'start coop-supervisor.exe')
+          ('pid %s' % relay) if relay else
+          'nothing on the relay port - open the co-op host tab, which starts the in-process relay')
 
     # Client machine: reachable at all? The share flaps every few seconds, so this polls patiently
     # rather than concluding "down" from one probe - that false negative cost a full preflight run

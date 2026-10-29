@@ -4,6 +4,12 @@ version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
 
+# The relay is a library so the in-process agent can embed it and host without a second program, and a binary
+# so it can still be run standalone (testing, or on a third machine).
+[lib]
+name = "coop_supervisor"
+path = "src/lib.rs"
+
 [[bin]]
 name = "coop-supervisor"
 path = "src/main.rs"

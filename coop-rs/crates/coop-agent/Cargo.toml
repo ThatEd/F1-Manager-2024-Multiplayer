@@ -12,3 +12,6 @@ path = "src/lib.rs"
 [dependencies]
 coop-proto = { path = "../coop-proto" }
 coop-mem = { path = "../coop-mem" }
+# The relay, so the agent can host without a second program. This is the whole point of the supervisor being a
+# library as well as a binary: a player should launch the game, not the game plus a relay.
+coop-supervisor = { path = "../coop-supervisor" }

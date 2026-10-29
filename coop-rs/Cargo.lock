@@ -8,6 +8,7 @@ version = "0.1.0"
 dependencies = [
  "coop-mem",
  "coop-proto",
+ "coop-supervisor",
 ]
 
 [[package]]

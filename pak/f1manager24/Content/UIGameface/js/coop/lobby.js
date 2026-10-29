@@ -409,6 +409,24 @@
             lsSet(KEY_ROLE, "host");
             this.setState({ role: "host" });
             this.setStatus("asking the agent...");
+            /* Start the relay *inside the game* before anything else.
+             *
+             * Hosting used to need `coop-supervisor.exe` running alongside the game - a second thing to launch
+             * and forget, and forgetting it looks exactly like a broken mod. The agent is already in the
+             * process, so it binds the relay itself and this call is the whole "become the host" step.
+             *
+             * Not awaited: an error here (usually "port already in use" because a standalone supervisor is
+             * running) must not block the host flow, and the status line below reports the sim side, which is
+             * what the player acts on. */
+            agent("relay", "GET")
+                .then(function (r) {
+                    if (r && r.relay === "in-process") {
+                        log("relay started in-process on port " + r.port);
+                    } else if (r && r.error) {
+                        log("relay: " + r.error);
+                    }
+                })
+                .catch(function () { /* reported by the status line */ });
             // Open the Steam lobby *here*, on the host tab, rather than at launch.
             //
             // This is what makes a friend's "Join Game" appear at all: Steam only shows a joinable session for

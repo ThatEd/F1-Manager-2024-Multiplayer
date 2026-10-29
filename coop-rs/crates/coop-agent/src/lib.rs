@@ -263,6 +263,55 @@ fn lobby_body() -> String {
 /// Called from the front-end: the host screen says `state=waiting` when it mounts and `state=idle` when it
 /// leaves. Tying the lobby to the tab is Steam's own guidance - "only create lobbies when needed" - and it
 /// means a player who never opens multiplayer never creates one.
+/// Starts the relay *inside the game process*, so hosting needs no second program.
+///
+/// Before this, "host" meant starting `coop-supervisor.exe`: a second thing to launch and forget, and
+/// forgetting it looks identical to a broken mod. The agent is already inside the game, so it binds the socket
+/// itself and the standalone binary becomes optional (useful for testing, or for a relay on a third machine).
+///
+/// Idempotent - the host tab can be opened more than once, and the second call must not try to re-bind.
+pub fn start_relay(bind: &str, port: u16) -> Result<u16, String> {
+    static RELAY: OnceLock<Result<u16, String>> = OnceLock::new();
+    RELAY.get_or_init(|| match coop_supervisor::serve(bind, port) {
+        Ok(relay) => {
+            log(&format!(
+                "relay listening on {} (in-process; no separate supervisor needed)",
+                relay.addr
+            ));
+            Ok(relay.addr.port())
+        }
+        Err(e) => {
+            /* AddrInUse is the interesting case and it is usually benign: a standalone coop-supervisor.exe is
+             * already running and doing the job. Saying "failed" would send someone hunting a problem that
+             * does not exist, so the message names the likely cause. */
+            let msg = if e.kind() == std::io::ErrorKind::AddrInUse {
+                format!(
+                    "port {port} is already in use - if coop-supervisor.exe is running, that is serving the \
+                     role and this is harmless"
+                )
+            } else {
+                format!("could not bind {bind}:{port}: {e}")
+            };
+            log(&format!("relay not started: {msg}"));
+            Err(msg)
+        }
+    })
+    .clone()
+}
+
+/// JSON for `GET /coop/relay`: whether the in-process relay is up, and where.
+fn relay_body() -> String {
+    /* `0.0.0.0`, not loopback. A relay on 127.0.0.1 serves this machine and silently refuses the other player,
+     * which presents as "no sync" rather than as a bind mistake. */
+    match start_relay("0.0.0.0", coop_supervisor::DEFAULT_PORT) {
+        Ok(port) => format!(
+            "{{\"relay\":\"in-process\",\"bind\":\"0.0.0.0\",\"port\":{port},\
+              \"separate_process_needed\":false}}"
+        ),
+        Err(e) => format!("{{\"relay\":\"failed\",\"error\":\"{e}\"}}"),
+    }
+}
+
 fn lobby_set(state: &str) -> String {
     let want = match state.trim().to_ascii_lowercase().as_str() {
         "waiting" | "host" | "hosting" => lobby_policy::HostState::Waiting,
@@ -1150,10 +1199,11 @@ fn serve_lobby(port: u16) {
                     .collect();
                 ("200 OK", format!("{{\"lines\":[{}],\"pending\":{}}}", lines.join(","), outbox_len()))
             }
-            // The combined clock state: both players' reasons and what the world should be doing.
+            // The combined clock state, driven by the host tab.
             //
             // `seq` is what the front-end keys on. Acting on every poll would re-pause a paused world
             // forever; acting on a new `seq` acts exactly once per transition. See `clocksync`.
+            ("GET", "/coop/relay") => ("200 OK", relay_body()),
             // Steam lobby, as a friend's client would see it.
             //
             // Read-only: reports the mod's intent (`state`) and Steam's reality (`lobby_id`) side by side, so
