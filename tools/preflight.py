@@ -1,4 +1,4 @@
-"""Pre-flight gate for a synced race. Refuses to say READY unless the whole chain is live.
+﻿"""Pre-flight gate for a synced race. Refuses to say READY unless the whole chain is live.
 
 Why this exists
 ---------------
@@ -29,11 +29,32 @@ import ctypes.wintypes as w
 import hashlib
 import os
 import re
+import shutil
 import struct
+import subprocess
 import sys
 import time
 
-SHARE = os.environ.get('COOP_REMOTE_SHARE', r'\\<client-pc>\e')
+def _find_share():
+    """The other machine's share, without trusting one hard-coded address.
+
+    The LAN moved from `192.168.1.x` to `10.32.231.x` and back during this work, and "the client is
+    unreachable" was concluded from a single failed name lookup twice while the machine was on the whole
+    time. Several candidates are tried before giving up.
+    """
+    override = os.environ.get('COOP_REMOTE_SHARE')
+    if override:
+        return override
+    for c in (r'\\<client-pc>\e', r'\\192.168.1.100\e', r'\\192.168.50.101\e', r'\\10.32.231.100\e'):
+        try:
+            if os.path.isdir(c):
+                return c
+        except OSError:
+            continue
+    return r'\\192.168.1.100\e'
+
+
+SHARE = _find_share()
 HOST_BIN = r'E:\Steam\steamapps\common\F1 Manager 2024\F1Manager24\Binaries\Win64'
 CLIENT_BIN = SHARE + r'\SteamLibrary\steamapps\common\F1 Manager 2024\F1Manager24\Binaries\Win64'
 AGENT_PORT = 45991
@@ -248,12 +269,35 @@ def listening(port, local_only=True):
 
 
 def file_hash(path):
-    """Full SHA-256, for comparing an installed pak against the built one."""
+    """Full SHA-256, for comparing an installed *binary* against the built one."""
     try:
         with open(path, 'rb') as f:
             return hashlib.sha256(f.read()).hexdigest()
     except OSError:
         return None
+
+
+def pak_content_hash(path):
+    """What a pak *contains*, not what its bytes are.
+
+    repak does not order entries stably between runs, so two builds from identical sources differ byte for
+    byte. Comparing raw bytes therefore declared a freshly deployed pak STALE on every rebuild - the check
+    fired unconditionally, which is worse than not having it, because it trains you to ignore it. `repak
+    hash-list` gives the per-entry SHA-256, sorted so entry order cannot matter.
+    """
+    repak = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'bin', 'repak.exe')
+    if not os.path.exists(repak):
+        repak = shutil.which('repak')
+    if not repak or not os.path.exists(path):
+        return None
+    try:
+        res = subprocess.run([repak, 'hash-list', path], capture_output=True, text=True, timeout=120)
+    except (OSError, subprocess.SubprocessError):
+        return None
+    if res.returncode != 0:
+        return None
+    lines = sorted(l.strip() for l in (res.stdout or '').replace('\r', '\n').split('\n') if l.strip())
+    return hashlib.sha256('\n'.join(lines).encode()).hexdigest()
 
 
 def read_side(bin_dir):
@@ -604,10 +648,10 @@ def main():
         if not os.path.exists(installed):
             c.add(False, '%s coop pak is installed' % label, 'missing %s' % installed)
             continue
-        same = file_hash(installed) == file_hash(built)
+        same = pak_content_hash(installed) == pak_content_hash(built)
         c.add(same, '%s coop pak matches the build' % label,
               'identical' if same else
-              'STALE: installed %d bytes, built %d bytes - run tools/deploy_pak.py'
+              'STALE: contents differ (installed %d bytes, built %d bytes) - run tools/deploy_pak.py'
               % (os.path.getsize(installed), os.path.getsize(built)))
 
     ok = c.report(require_flow='--started' in sys.argv)

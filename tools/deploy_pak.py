@@ -1,4 +1,4 @@
-#!/usr/bin/env python3
+﻿#!/usr/bin/env python3
 """Build, verify and deploy the co-op UI pak.
 
 Why this exists
@@ -133,6 +133,26 @@ def stray_files(repak: str) -> list[str]:
     return sorted(names - want)
 
 
+def pak_content_hash(repak: str, path: str) -> str | None:
+    """A hash of what the pak *contains*, not of its bytes.
+
+    Two builds from identical sources are **not** byte-identical: repak does not order entries stably, so the
+    first entry can be a different file each run and the index hash changes with it. Comparing raw bytes
+    therefore called a perfectly good, freshly deployed pak "STALE" - which happened on every rebuild and made
+    the one check that is supposed to catch a stale pak fire unconditionally, which is worse than not having it.
+
+    What actually matters is that both machines mount the same files with the same contents. `repak hash-list`
+    reports exactly that: per-entry SHA-256, which is then sorted so entry order cannot matter.
+    """
+    if not os.path.exists(path):
+        return None
+    got = run([repak, 'hash-list', path])
+    if got.returncode != 0:
+        return None
+    lines = sorted(l.strip() for l in (got.stdout or '').replace('\r', '\n').split('\n') if l.strip())
+    return hashlib.sha256('\n'.join(lines).encode()).hexdigest()
+
+
 def build(repak: str) -> None:
     # Remove first: repak appends to an existing archive, which would leave stale entries behind and
     # make the verification below meaningless.
@@ -157,6 +177,11 @@ def build(repak: str) -> None:
     # So repak is given a staging tree whose root is the directory *containing* `F1Manager24/`, which makes
     # it emit the full relative path for each file.
     staging = tempfile.mkdtemp(prefix='coop-pak-')
+    # A fixed mtime for every staged file. repak records each file's timestamp, and `shutil.copy2` preserves
+    # it, so building from two trees with identical *contents* produced byte-different paks - and every hash
+    # comparison afterwards called a freshly deployed pak "STALE". Pinning the time makes the same sources
+    # produce the same bytes, which is what makes "installed matches built" a meaningful check.
+    FIXED_MTIME = 1600000000
     try:
         for name in os.listdir(PAK_SRC):
             src = os.path.join(PAK_SRC, name)
@@ -166,6 +191,9 @@ def build(repak: str) -> None:
             else:
                 os.makedirs(os.path.dirname(dst), exist_ok=True)
                 shutil.copy2(src, dst)
+        for dirpath, _dirnames, filenames in os.walk(staging):
+            for fn in filenames:
+                os.utime(os.path.join(dirpath, fn), (FIXED_MTIME, FIXED_MTIME))
         cmd = [repak, 'pack', '-m', '../../../', '--version', 'V11', staging, PAK_OUT]
         res = run(cmd)
         print(res.stdout.strip() or res.stderr.strip())
@@ -261,13 +289,18 @@ def client_game_root(share: str) -> str:
     return os.path.join(share, CLIENT_GAME_REL)
 
 
-def check_installed(game_root: str, label: str = 'host') -> list[str]:
+def check_installed(game_root: str, label: str = 'host', repak: str | None = None) -> list[str]:
     target = installed_path(game_root)
     if not os.path.exists(target):
         return ['no %s in %s' % (PAK_NAME, os.path.dirname(target))]
     built = os.path.getsize(PAK_OUT)
     there = os.path.getsize(target)
-    if sha256(target) != sha256(PAK_OUT):
+    repak = repak or find_repak()
+    # Content, not bytes. A byte comparison reports STALE for a pak that was copied straight from this
+    # build, because repak does not order entries stably between runs; see `pak_content_hash`.
+    same = (pak_content_hash(repak, target) == pak_content_hash(repak, PAK_OUT)) if repak else \
+        (sha256(target) == sha256(PAK_OUT))
+    if not same:
         return [
             '%s pak is NOT the one just built (installed %d bytes, built %d bytes)' % (label, there, built)
         ]

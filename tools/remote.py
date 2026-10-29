@@ -491,10 +491,21 @@ def cmd_install_pak():
     if not os.path.exists(LOCAL_PAK):
         raise SystemExit('build it first: pak/CoopBridge_P.pak')
     dst_dir = SHARE + GAME_PAKS
-    dst = os.path.join(dst_dir, 'CoopBridge_P.pak')
+    # `~mods` is the conventional home for a mod pak, and it is also how a *stale* copy survived: installing
+    # to the `Paks/` root left an older pak in `~mods`, both mounted, and the engine is free to prefer either.
+    # The client therefore ran the old UI (old multiplayer tile, old team bug) while every version check here
+    # compared the file in the root and reported a match. One pak, one place.
+    dst = os.path.join(dst_dir, '~mods', 'CoopBridge_P.pak')
+    stray = os.path.join(dst_dir, 'CoopBridge_P.pak')
     print('copying %s -> %s' % (LOCAL_PAK, dst))
+    os.makedirs(os.path.join(dst_dir, '~mods'), exist_ok=True)
     shutil.copy2(LOCAL_PAK, dst)
     print('installed, %d bytes' % os.path.getsize(dst))
+    if os.path.exists(stray):
+        # Removed rather than left in place: two copies of the same mod pak with different contents is the
+        # one state that can silently run old code while every check says the new build is deployed.
+        os.remove(stray)
+        print('removed the stale copy in %s (it would have shadowed or doubled this one)' % dst_dir)
     print('a running game must be restarted to pick it up')
 
 
