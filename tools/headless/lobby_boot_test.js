@@ -111,9 +111,18 @@ console.log('\nthe menu anchor');
   ok(menuSrc !== null, 'MainMenu.js can be read from the export', exportMenu);
 
   if (menuSrc !== null) {
-    const count = (menuSrc.match(/MainMenu_rightBox/g) || []).length;
-    ok(count > 0, 'the patch anchor MainMenu_rightBox still exists',
-      'the patch would find no anchor and fall back to a corner button');
+    /* The multiplayer tile takes the Race Replay slot, so `MainMenu_scenarioMode` is the anchor that matters.
+     * `MainMenu_rightBox` was the previous target and is the wrong place - it is the carousel/news column, not
+     * the action row. Both are asserted so a future move is a deliberate edit rather than a silent drift. */
+    ok(/MainMenu_scenarioMode/.test(menuSrc),
+      'MainMenu.js still renders MainMenu_scenarioMode (the tile multiplayer replaces)',
+      'without it there is no action-row tile to take, and the mod would have nowhere correct to put its entry');
+
+    /* Race Replay is relocated to the small button row, which is delimited by this separator. If the row is
+     * restructured, Race Replay would be lost - a regression in normal play caused by the mod. */
+    ok(/MainMenu_separator horizontal/.test(menuSrc),
+      'MainMenu.js still has the small button row (MainMenu_separator horizontal)',
+      'Race Replay is re-emitted just before it');
   }
 }
 
@@ -126,6 +135,37 @@ console.log('\nthe fallback path');
 ok(/function fallback\(/.test(lobbySrc), 'lobby.js defines a fallback button');
 ok(/coop-fallback/.test(lobbySrc), 'the fallback is identifiable (id coop-fallback)');
 ok(/position:fixed/.test(lobbySrc), 'the fallback is positioned, not layout-dependent');
+
+// ---------------------------------------------------------------------------------------------
+// 3b. The two modes, and that Race Replay is not lost
+// ---------------------------------------------------------------------------------------------
+
+console.log('\nmode list and race replay');
+
+{
+  const modeIds = [...lobbySrc.matchAll(/id:\s*"([a-z-]+)"/g)].map((m) => m[1]);
+  ok(modeIds.length === 2, 'exactly two modes are offered', modeIds.join(', '));
+  ok(modeIds.includes('shared-team') && modeIds.includes('versus'),
+    'the two modes are Shared team and Versus', modeIds.join(', '));
+  ok(!/coop-career/.test(lobbySrc),
+    'the unimplemented "Co-op career" mode is gone',
+    'a third choice the data model cannot honour is worse than two that work');
+
+  /* Race Replay must survive the change. It is moved into the small button row, not removed, and the mod
+   * must not cost the player a feature of the base game. */
+  ok(/SCENARIOMODE_HEADER/.test(lobbySrc), 'lobby.js re-emits Race Replay (SCENARIOMODE_HEADER)');
+  ok(/ScreenID\.ScenarioDLCSelection/.test(lobbySrc),
+    'relocated Race Replay opens ScenarioDLCSelection, which is where the original tile went',
+    'MainMenu.js:169 - sending it to ScenarioMode instead would open the wrong screen');
+
+  /* The multiplayer tile reuses the same component and texture as the tile it replaces, so the bounds cannot
+   * drift; only the colour changes, and it changes through CSS. */
+  ok(/FrontendTextureButton/.test(lobbySrc), 'the tile uses FrontendTextureButton like its neighbours');
+  ok(/Frontend\/ExclusiveScenarios/.test(lobbySrc),
+    'the tile uses the Exclusive Scenarios texture, as asked');
+  ok(/MainMenu_coopMode/.test(lobbySrc), 'the tile carries a hook class for the purple treatment');
+  ok(/CoopPurple|hue-rotate/.test(lobbySrc), 'the purple is applied by CSS, not a separate texture');
+}
 
 // ---------------------------------------------------------------------------------------------
 // 4. Page wiring

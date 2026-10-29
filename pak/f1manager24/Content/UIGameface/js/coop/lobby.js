@@ -141,6 +141,16 @@
     var CSS = [
         ".CoopMainMenuEntry{display:flex;flex-direction:column;align-items:flex-start;",
         "margin-bottom:1.1111111111rem;}",
+        /* The multiplayer tile takes Race Replay's slot, so it inherits the tile's bounds by reusing the
+         * same component, texture and modifiers. Only the colour changes, and it changes through a filter
+         * rather than a different texture: the shape and size then cannot drift from the tile beside it,
+         * which is what "same bounds as race replay" has to mean in practice.
+         *
+         * `hue-rotate` is used instead of painting a purple overlay because the game draws its own gradient,
+         * stripes and darken layers over the texture. An overlay would be covered by them; a filter applies
+         * to the composited result, so the whole tile shifts together. */
+        ".MainMenu_coopMode .FrontendTextureButton_imageLayer.texture{filter:hue-rotate(250deg) saturate(1.15) brightness(.95);}",
+        ".MainMenu_coopMode .FrontendTextureButton_imageLayer.gradient{filter:hue-rotate(250deg);}",
         // Scale, don't resize: transform leaves the component's own layout maths intact.
         ".MainMenu_rightBox .MainMenu_carousel{transform:scale(.6);transform-origin:top right;",
         "margin-top:0;}",
@@ -201,6 +211,7 @@
         "project/components/MenuButton",
         "project/components/SimpleButton",
         "project/components/TeamIconButton",
+        "project/modules/frontend/components/FrontendTextureButton",
         "project/modules/teamManagement/TeamManagementHeader",
         "project/utils/VoltaModuleFocusPriority",
     ];
@@ -236,6 +247,7 @@
                             MenuButton,
                             SimpleButton,
                             TeamIconButton,
+                            FrontendTextureButton,
                             TeamManagementHeader,
                             FocusPriority
                         ) {
@@ -254,7 +266,7 @@
                                    Wrapped into the shape the rest of this file expects, with the namespace
                                    kept on `.module` so anything else it needs is still reachable. */
                                 nav: Nav && typeof Nav.set === "function"
-                                    ? { set: Nav.set, module: Nav }
+                                    ? { set: Nav.set, goToPrevious: Nav.goToPrevious, module: Nav }
                                     : Nav,
                                 screens: Screens,
                                 frontendData: FrontendData,
@@ -262,6 +274,7 @@
                                 MenuButton: MenuButton.MenuButton,
                                 SimpleButton: SimpleButton.SimpleButton,
                                 TeamIconToggle: TeamIconButton.TeamIconToggle,
+                                FrontendTextureButton: FrontendTextureButton.FrontendTextureButton,
                                 TeamManagementHeader: TeamManagementHeader.TeamManagementHeader,
                                 focusPriority: FocusPriority.VoltaModuleFocusPriority,
                             };
@@ -321,11 +334,12 @@
             label: "Versus",
             detail: "A team each, racing the other player. Shared calendar and results, your own garage.",
         },
-        {
-            id: "coop-career",
-            label: "Co-op career",
-            detail: "Two teams, one career. Shared progression and calendar, separate garages.",
-        },
+        /*
+         * There were three modes here. "Co-op career" was removed: it is the same shape as Versus for the
+         * only thing that differs (whose team the save belongs to), and the game's data model has exactly one
+         * `Player` row with one `TeamID`, so a genuinely third arrangement would be a lie the engine cannot
+         * honour - see docs/TEAM-RETARGET.md. Two choices that both work beat three where one is unimplemented.
+         */
     ];
 
     function modeById(id) {
@@ -518,10 +532,16 @@
                 })
                 .catch(function (e) {
                     self.setState({ armed: false });
+                    /* The agent lives inside the game process, so the fix is never "start another program" -
+                     * it is "the DLL is not in this process". Saying "use the launcher" sent people looking
+                     * for a second executable that should not exist, so the message now names what is
+                     * actually missing and how it gets there. */
                     self.setStatus(
-                        "co-op agent not reachable (" +
+                        "co-op agent not in this game process (" +
                             String(e.message || e) +
-                            "). Start the game through the co-op launcher.",
+                            "). The mod's agent is a DLL injected into the game; nothing should be started" +
+                            " separately. Run coop-link --inject once against the running game, or start the" +
+                            " game through the co-op launcher, which injects it for you.",
                         true
                     );
                 });
@@ -849,6 +869,67 @@
         return cloneVnode(vnode, newKids);
     }
 
+    /*
+     * Replaces the child vnode whose className contains `marker` with `make(oldVnode) -> newVnode`.
+     *
+     * Added because the multiplayer entry belongs where Race Replay is, not appended to the carousel. The
+     * original placement put a plain `MenuButton` into `MainMenu_rightBox` - the news/carousel column - which
+     * is not the button row a player looks at. The main-menu actions live in `MainMenu_leftBox`, as
+     * `FrontendTextureButton`s inside `MainMenu_hBox`, and `MainMenu_scenarioMode` is the Race Replay tile.
+     *
+     * `make` receives the original vnode so the caller can rebuild it elsewhere (Race Replay is relocated,
+     * not deleted) before returning its replacement.
+     */
+    function replaceAt(vnode, marker, make, h) {
+        var lost = { found: false };
+
+        function walk(node, inArray) {
+            if (!node || typeof node !== "object") return inArray ? node : null;
+
+            if (node.pop !== undefined) {
+                var out = new Array(node.length);
+                for (var i = 0; i < node.length; i++) {
+                    var before = lost.found;
+                    var next = walk(node[i], true);
+                    // In an array, a replacement may legitimately be a list of nodes.
+                    out[i] = next;
+                    if (!before && lost.found) {
+                        // The marker was this element; expand any list it returned.
+                        if (next && next.pop !== undefined) {
+                            var flat = out.slice(0, i);
+                            for (var j = 0; j < next.length; j++) flat.push(next[j]);
+                            for (var k = i + 1; k < node.length; k++) flat.push(node[k]);
+                            return flat;
+                        }
+                    }
+                }
+                return out;
+            }
+
+            var attrs = node.attributes;
+            /* Both fields, deliberately. Plain `div`s carry `className`, but the frontend tile components carry
+             * `rootClassName` - `MainMenu_scenarioMode` is a `FrontendTextureButton` prop, so checking only
+             * `className` silently missed it and the patch reported success having changed nothing. The
+             * original `prependTo` got away with `className` only because it targeted a `div`
+             * (`MainMenu_rightBox`); this one targets a component. */
+            var cls = attrs && (attrs.className || attrs.rootClassName);
+            if (typeof cls === "string" && cls.indexOf(marker) >= 0) {
+                lost.found = true;
+                return make(node);
+            }
+
+            var kids = node.children;
+            if (!kids || typeof kids !== "object") return node;
+            var newKids = walk(kids, false);
+            if (newKids === kids) return node;
+            return cloneVnode(node, newKids);
+        }
+
+        var result = walk(vnode, false);
+        result.__coopFound = lost.found;
+        return result;
+    }
+
     function cloneVnode(vnode, children) {
         var copy = {};
         for (var k in vnode) {
@@ -880,6 +961,9 @@
             var h = ctx.preact.h;
             var original = menuCtor.prototype.render;
             menuCtor.__coopOriginalRender = original;
+
+            // Captured during the transform so Race Replay can be re-emitted in the small button row.
+            var raceReplayTile = null;
 
             menuCtor.prototype.render = function (props, state) {
                 var tree;
@@ -924,22 +1008,82 @@
                         return tree;
                     }
 
-                    var button = h(ctx.MenuButton, {
+                    /* Where this goes, and why.
+                     *
+                     * The multiplayer tile belongs in the main action row in `MainMenu_leftBox`, exactly where
+                     * Race Replay is - not in `MainMenu_rightBox`, which is the carousel/news column. An
+                     * earlier version prepended a plain `MenuButton` into `rightBox`, which both put it in the
+                     * wrong place and left the layout inconsistent with the tiles beside it.
+                     *
+                     * Race Replay is *relocated*, not removed: it moves to the small button row next to
+                     * Credits, as a `MenuButton` with `smallIconOnly` modifiers to match its new neighbours.
+                     * Losing it would be a regression in normal play, which this mod must not cause. */
+                    if (typeof ctx.FrontendTextureButton !== "function") {
+                        log("menu injection skipped: FrontendTextureButton unavailable");
+                        return tree;
+                    }
+
+                    var coopTile = h(ctx.FrontendTextureButton, {
+                        rootClassName: "MainMenu_scenarioMode MainMenu_coopMode",
                         // Literal, not a loc key: `translate` only resolves `[...]`.
                         label: "Multiplayer",
                         icon: "/img/icons/team.svg",
+                        // Same texture and modifiers as Race Replay so the bounds match exactly; the colour is
+                        // changed to purple with CSS rather than a different texture, so the shape cannot drift.
+                        texture: "Frontend/ExclusiveScenarios",
+                        modifiers: "scenarioPink noSlashes CoopPurple",
                         outcome: "coopMultiplayer",
-                        modifiers: "defaultSize crossesBR shadow",
                         onSelect: function () {
                             ctx.nav.set(COOP_SCREEN);
                         },
                     });
 
-                    var result = prependTo(tree, "MainMenu_rightBox", button, h);
-                    if (result === tree) {
-                        log("could not find MainMenu_rightBox in the menu tree");
+                    var replaced = replaceAt(tree, "MainMenu_scenarioMode", function (old) {
+                        /* Lift Race Replay out of the tile it occupies so it can be re-emitted in the small
+                         * row. The original vnode is captured here, before the tree is rewritten. */
+                        raceReplayTile = old;
+                        return coopTile;
+                    }, h);
+
+                    if (!replaced.__coopFound) {
+                        log("could not find MainMenu_scenarioMode in the menu tree");
+                        return tree;
                     }
-                    return result;
+                    delete replaced.__coopFound;
+
+                    // Now put Race Replay into the small row, before Credits.
+                    if (raceReplayTile) {
+                        var smallRow = replaceAt(replaced, "MainMenu_separator horizontal", function (old) {
+                            return [
+                                h(ctx.MenuButton, {
+                                    label: "[SCENARIOMODE_HEADER]",
+                                    icon: "/img/icons/scenarioMode.svg",
+                                    outcome: "ScenarioMode",
+                                    modifiers: "smallIconOnly opaque",
+                                    onSelect: function () {
+                                        /* `ScenarioDLCSelection`, not `ScenarioMode`: that is where the original
+                                         * Race Replay tile goes (`MainMenu.js:169`), and `ScenarioMode` is a
+                                         * different destination reached from inside it. Getting this wrong would
+                                         * have left a button that opens the wrong screen - a regression in
+                                         * normal play caused by the mod, which is the one thing this must not do. */
+                                        ctx.nav.set(ctx.screens.ScreenID.ScenarioDLCSelection, {
+                                            onBack: ctx.nav.goToPrevious,
+                                        });
+                                    },
+                                }),
+                                old,
+                            ];
+                        }, h);
+                        if (smallRow.__coopFound) {
+                            delete smallRow.__coopFound;
+                            replaced = smallRow;
+                            log("race replay relocated to the small button row");
+                        } else {
+                            log("could not find the small button row; race replay not relocated");
+                        }
+                    }
+
+                    return replaced;
                 } catch (e) {
                     log("menu injection failed: " + e);
                     return tree;

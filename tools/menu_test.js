@@ -90,15 +90,35 @@ function fixture() {
         element("div", { className: "MainMenu_vBox spacing10" }, loadCareer, newCareer)
     );
 
+    /* Mirrors the real `MainMenu.js` shape closely enough to test placement:
+     *   - `catRow` holds Create A Team and `MainMenu_scenarioMode` (the Race Replay tile the mod replaces)
+     *   - `bottomRow` holds the small buttons, delimited by `MainMenu_separator horizontal`, which is where
+     *     Race Replay is relocated to
+     * Without both markers present, the patch's own "could not find" paths would be what got tested. */
     const catRow = element(
         "div",
         { className: "MainMenu_hBox spacing20 flex" },
         component(function FrontendTextureButton() {}, { label: "[CREATE_A_TEAM]" }),
-        element("div", { className: "MainMenu_vBox spacing20 flex" }, component(function FrontendTextureButton() {}, {}))
+        element(
+            "div",
+            { className: "MainMenu_vBox spacing20 flex" },
+            component(function FrontendTextureButton() {}, {
+                rootClassName: "MainMenu_scenarioMode",
+                label: "[SCENARIOMODE_HEADER]",
+                texture: "Frontend/Scenarios",
+            })
+        )
     );
 
     const mainButtons = element("div", { className: "MainMenu_vBox spacing20 mainButtons" }, hasSaveButtonsBox, catRow);
-    const bottomRow = element("div", { className: "MainMenu_hBox" }, component(function MenuButton() {}, {}));
+    const smallRow = element(
+        "div",
+        { className: "MainMenu_hBox spacing10" },
+        component(function MenuButton() {}, { label: "[OPTIONS_SETTINGS]" }),
+        element("div", { className: "MainMenu_separator horizontal" }),
+        component(function MenuButton() {}, { label: "[CREDITS]" })
+    );
+    const bottomRow = element("div", { className: "MainMenu_hBox" }, smallRow);
     const leftBox = element("div", { className: "MainMenu_leftBox hasSaveGame" }, logo, mainButtons, bottomRow);
 
     const carousel = component(function Carousel() {}, { rootClassName: "MainMenu_carousel" });
@@ -319,6 +339,12 @@ function makeProvided() {
             "project/components/MenuButton": { MenuButton: componentStub("MenuButton") },
             "project/components/SimpleButton": { SimpleButton: componentStub("SimpleButton") },
             "project/components/TeamIconButton": { TeamIconToggle: componentStub("TeamIconToggle") },
+            /* The multiplayer tile reuses the component the Race Replay tile uses, so the bounds cannot drift.
+             * Stubbed like its neighbours: the real one needs textures and CSS the harness does not carry, and
+             * what is being tested here is where the node lands in the tree, not how it paints. */
+            "project/modules/frontend/components/FrontendTextureButton": {
+                FrontendTextureButton: componentStub("FrontendTextureButton"),
+            },
             "project/modules/teamManagement/TeamManagementHeader": {
                 TeamManagementHeader: componentStub("TeamManagementHeader"),
             },
@@ -350,7 +376,12 @@ function findAll(vnode, predicate, out) {
 }
 
 function classNameOf(vnode) {
-    return vnode && vnode.attributes && vnode.attributes.className;
+    /* Both fields. A plain `div` carries `className`; the frontend tile components carry `rootClassName`
+     * (`MainMenu_scenarioMode` is a `FrontendTextureButton` prop). A helper that reads only `className`
+     * reports zero matches for a tile that is present, which is exactly how the multiplayer tile went
+     * "missing" in this test while the injected tree plainly contained it. */
+    const a = vnode && vnode.attributes;
+    return a && (a.className || a.rootClassName);
 }
 
 // ---------------------------------------------------------------- tests
@@ -486,30 +517,71 @@ async function runAsync() {
     });
     ok(rightBoxes.length === 1, "exactly one MainMenu_rightBox in the tree", String(rightBoxes.length));
 
-    if (rightBoxes.length === 1) {
-        const kids = rightBoxes[0].children || [];
-        const first = kids[0];
-        const firstIsEntry = !!(
-            first &&
-            first.attributes &&
-            typeof first.attributes.className === "string" &&
-            first.attributes.className.indexOf("CoopMainMenuEntry") >= 0
-        );
-        ok(firstIsEntry, "the multiplayer entry is the first child of the right column");
+    /* The multiplayer tile must be in the MAIN ACTION ROW, where Race Replay was - not in the right column.
+     * That was the placement error: `MainMenu_rightBox` is the carousel/news column, so a tile injected there
+     * looked nothing like the buttons beside it and sat in the wrong part of the screen. */
+    const coopTiles = findAll(tree, (v) => {
+        const cn = classNameOf(v);
+        return typeof cn === "string" && cn.indexOf("MainMenu_coopMode") >= 0;
+    });
+    ok(coopTiles.length === 1, "exactly one multiplayer tile in the tree", String(coopTiles.length));
 
-        const entryChild = first && first.children && first.children[0];
+    if (coopTiles.length === 1) {
         ok(
-            entryChild && entryChild.attributes && entryChild.attributes.label === "Multiplayer",
-            "the entry is a MenuButton labelled Multiplayer",
-            entryChild && entryChild.attributes && entryChild.attributes.label
+            coopTiles[0].attributes && coopTiles[0].attributes.label === "Multiplayer",
+            "the tile is labelled Multiplayer",
+            coopTiles[0].attributes && coopTiles[0].attributes.label
+        );
+        ok(
+            coopTiles[0].attributes && coopTiles[0].attributes.texture === "Frontend/ExclusiveScenarios",
+            "the tile uses the Exclusive Scenarios texture",
+            coopTiles[0].attributes && coopTiles[0].attributes.texture
+        );
+        ok(
+            coopTiles[0].attributes &&
+            typeof coopTiles[0].attributes.modifiers === "string" &&
+            coopTiles[0].attributes.modifiers.indexOf("CoopPurple") >= 0,
+            "the tile carries the purple modifier",
+            coopTiles[0].attributes && coopTiles[0].attributes.modifiers
         );
 
-        // The carousel must still be there: the entry is prepended, not replacing anything.
-        const carousels = findAll(rightBoxes[0], (v) => {
+        // It must be in the left column, because that is where the action tiles live.
+        const leftBoxes = findAll(tree, (v) => {
+            const cn = classNameOf(v);
+            return typeof cn === "string" && cn.indexOf("MainMenu_leftBox") >= 0;
+        });
+        ok(
+            leftBoxes.length === 1 && findAll(leftBoxes[0], (v) => v === coopTiles[0]).length === 1,
+            "the multiplayer tile is inside MainMenu_leftBox (the action column), not the right column"
+        );
+    }
+
+    /* Race Replay must still exist. It is relocated to the small button row, and losing it would be a
+     * regression in normal play caused by the mod. */
+    const replay = findAll(tree, (v) => {
+        const a = v.attributes;
+        return a && a.label === "[SCENARIOMODE_HEADER]";
+    });
+    ok(replay.length === 1, "Race Replay still appears exactly once after relocation", String(replay.length));
+
+    /* The scenario tile must NOT remain in the action row - it was replaced there, not duplicated. */
+    const scenarioTiles = findAll(tree, (v) => {
+        const cn = classNameOf(v);
+        const a = v.attributes;
+        return typeof cn === "string" && cn.indexOf("MainMenu_scenarioMode") >= 0 &&
+            !(a && typeof a.modifiers === "string" && a.modifiers.indexOf("CoopPurple") >= 0);
+    });
+    ok(scenarioTiles.length === 0,
+      "the original Race Replay tile is gone from the action row (replaced, not duplicated)",
+      String(scenarioTiles.length));
+
+    /* The carousel must still be there: the right column is now untouched, but it must not have been eaten. */
+    {
+        const carousels = findAll(tree, (v) => {
             const a = v.attributes;
             return a && a.rootClassName === "MainMenu_carousel";
         });
-        ok(carousels.length === 1, "the replay carousel survived the injection");
+        ok(carousels.length === 1, "the replay carousel is still present");
     }
 
     // ---- 6. the left column is untouched
@@ -530,12 +602,23 @@ async function runAsync() {
     // Two independent renders must produce the same result; mutating a shared array would not.
     const treeA = new env.InnerMainMenu({}).render();
     const treeB = new env.InnerMainMenu({}).render();
+    /* "Exactly one entry" now means one multiplayer tile, and one relocated Race Replay. The old check counted
+     * `CoopMainMenuEntry` wrappers, which no longer exist: the tile replaces a tile in place rather than being
+     * prepended into a column. Counting the two things that must appear exactly once keeps the intent - a
+     * repeated render must not stack a second copy. */
     const countEntries = (t) =>
         findAll(t, (v) => {
             const cn = classNameOf(v);
-            return typeof cn === "string" && cn.indexOf("CoopMainMenuEntry") >= 0;
+            return typeof cn === "string" && cn.indexOf("MainMenu_coopMode") >= 0;
         }).length;
-    ok(countEntries(treeA) === 1 && countEntries(treeB) === 1, "repeat renders each add exactly one entry", countEntries(treeA) + "/" + countEntries(treeB));
+    const countReplay = (t) =>
+        findAll(t, (v) => v.attributes && v.attributes.label === "[SCENARIOMODE_HEADER]").length;
+    ok(countEntries(treeA) === 1 && countEntries(treeB) === 1,
+      "repeat renders each add exactly one multiplayer tile",
+      countEntries(treeA) + "/" + countEntries(treeB));
+    ok(countReplay(treeA) === 1 && countReplay(treeB) === 1,
+      "repeat renders each relocate Race Replay exactly once",
+      countReplay(treeA) + "/" + countReplay(treeB));
 
     // ---- 8. the screen component renders
     if (env.screensLUT[99]) {
