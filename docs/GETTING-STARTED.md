@@ -99,13 +99,27 @@ What is actually true:
 - **So the work is not "find an event" — it is "fire the right command and see what moves."** The race
   sim object exists and is readable and sits at `simtime = 0` until a human clicks.
 
-The unrun test plan, in order, is in [UI-COMMANDS.md](UI-COMMANDS.md):
+**The tools to test it already exist**, so this is a launch, not a research project:
 
-1. `engine.trigger('StageProceed')` from a genuine pre-session screen — the cheapest thing to try, and it
-   may move the stage without the dialog-dismissal precondition.
-2. `engine.trigger('TravelToRaceWeekend')` from TeamManagement when the calendar's next event is a race.
-3. Only then, decompile the handler that references the `StageProceed` string at `0x5fa7c98` and read
-   what it validates before advancing.
+```powershell
+# 1. Find the pid, then watch the host side at 2 Hz. Writes nothing to the game.
+python tools\watch_session.py <pid> 120
+
+# 2. With the game on a genuine pre-session screen, fire the candidate through the mod's bridge,
+#    which already accepts any event by name:
+#      Raw StageProceed
+#    (echo it to tools/coop_server.py however you drive that server - see docs/CLIENT-UI-PRESS.md)
+
+# 3. Read the timeline back. What you are looking for is `simtime` leaving 0 and climbing, and the
+#    hook's `fires=` counter moving with it.
+```
+
+Then, in order, if `StageProceed` does nothing:
+
+1. `Raw TravelToRaceWeekend` from TeamManagement when the calendar's next event is a race.
+2. `Raw PreSessionClosed` alone, to confirm the baseline the export shows (a dialog dismissal, not a start).
+3. Only then decompile the handler that references the `StageProceed` string at `0x5fa7c98` and read what
+   it validates before advancing.
 
 **What each handler does is `unknown`** — the exe was read as a byte-string source, not decompiled, so
 these are labelled leads with offsets, not findings. If you conclude it cannot be driven from the UI
