@@ -1,4 +1,4 @@
-﻿"""Run code on the other PC and read the results back.
+"""Run code on the other PC and read the results back.
 
 The other machine exposes a writable SMB share but no SSH, no WinRM and no open coop port, so the
 channel is files: a request script goes in, its output and exit code come back. `remote-agent/run/`
@@ -641,7 +641,29 @@ def cmd_versions():
     remote_bin = SHARE + GAME_BIN
 
     def describe(path, label):
-        if not os.path.exists(path):
+        # A transient SMB failure is not a missing file. `os.path.exists` returns False for both, and an
+        # unreachable share was reported as "MISSING coop_agent.dll" during this work while the file was
+        # there all along - the same class of false negative as concluding a machine was off because one
+        # name lookup failed. Retry before believing it, and say which case it was.
+        for attempt in range(3):
+            try:
+                if os.path.exists(path):
+                    break
+            except OSError:
+                pass
+            time.sleep(0.4)
+        else:
+            # Distinguish "the share is not there" from "the file is not in it": only the second is a
+            # deployment problem.
+            parent = os.path.dirname(path)
+            try:
+                reachable = os.path.isdir(parent)
+            except OSError:
+                reachable = False
+            if not reachable:
+                print('%-8s: UNREADABLE  %s\n         (the share is not answering - this is NOT a missing '
+                      'file; re-run)' % (label, path))
+                return None
             print('%-8s: MISSING  %s' % (label, path))
             return None
         with open(path, 'rb') as f:
