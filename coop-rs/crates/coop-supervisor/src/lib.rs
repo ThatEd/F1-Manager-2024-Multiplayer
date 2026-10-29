@@ -637,6 +637,12 @@ mod arbitrate_tests {
 
     /// Starts `drain_peer` on an ephemeral port and returns the address to connect to.
     fn relay_for_test() -> (std::net::SocketAddr, Arc<Stats>) {
+        let (addr, stats, _agents) = relay_for_test_with_agents();
+        (addr, stats)
+    }
+
+    /// The same relay, but also handing back the agent registry so a test can wait for a real condition.
+    fn relay_for_test_with_agents() -> (std::net::SocketAddr, Arc<Stats>, Agents) {
         let listener = TcpListener::bind(("127.0.0.1", 0)).expect("bind");
         let addr = listener.local_addr().expect("addr");
         let reg: Registry = Arc::new(Mutex::new(Vec::new()));
@@ -644,6 +650,7 @@ mod arbitrate_tests {
         let coord: Coord = Arc::new(Mutex::new(Coordination::new(2)));
         let stats = Arc::new(Stats::default());
         let s2 = Arc::clone(&stats);
+        let a2 = Arc::clone(&agents);
         thread::spawn(move || {
             for incoming in listener.incoming() {
                 let Ok(stream) = incoming else { continue };
@@ -659,7 +666,7 @@ mod arbitrate_tests {
                 });
             }
         });
-        (addr, s2)
+        (addr, s2, a2)
     }
 
     /// Connects an agent and announces its side, as the real agent does on every heartbeat.
@@ -695,18 +702,37 @@ mod arbitrate_tests {
         }
     }
 
-    /// Gives the two `drain_peer` threads a moment to register both agents.
-    fn settle() {
-        thread::sleep(Duration::from_millis(120));
+    /// Waits until both agents are actually registered, instead of sleeping a guessed interval.
+    ///
+    /// `settle()` slept 120 ms and hoped. Under a parallel test run - the debug profile runs several of these
+    /// tests at once and each spawns threads - 120 ms was sometimes not enough, and about one run in three
+    /// failed with "the other player's agent should have received the clock, got None". A timing test that
+    /// fails on load is worse than no test: it teaches you to re-run until green. Polling the real condition
+    /// costs nothing when the threads are quick and cannot be too slow.
+    fn wait_for_agents(agents: &Agents, want: usize) {
+        let deadline = std::time::Instant::now() + Duration::from_secs(5);
+        loop {
+            let n = match agents.lock() {
+                Ok(g) => g.len(),
+                Err(p) => p.into_inner().len(),
+            };
+            if n >= want {
+                return;
+            }
+            if std::time::Instant::now() >= deadline {
+                panic!("only {n} of {want} agents registered within 5s; the relay is not accepting");
+            }
+            thread::sleep(Duration::from_millis(5));
+        }
     }
 
     /// The headline gap: a frame produced by one agent must reach the other agent.
     #[test]
     fn an_agents_frame_reaches_the_other_agents_socket() {
-        let (addr, _stats) = relay_for_test();
+        let (addr, _stats, agents) = relay_for_test_with_agents();
         let mut host = agent_on(addr, Side::Host);
         let mut client = agent_on(addr, Side::Client);
-        settle();
+        wait_for_agents(&agents, 2);
 
         host.write_all(&encode(&Msg::Clock { reasons: vec![0, 2], tick: 7 })).unwrap();
         host.flush().unwrap();
@@ -724,10 +750,10 @@ mod arbitrate_tests {
     /// the ledger and both players believed they had signed the same person.
     #[test]
     fn a_contract_claim_from_an_agent_is_arbitrated_and_the_loser_is_told() {
-        let (addr, stats) = relay_for_test();
+        let (addr, stats, agents) = relay_for_test_with_agents();
         let mut host = agent_on(addr, Side::Host);
         let mut client = agent_on(addr, Side::Client);
-        settle();
+        wait_for_agents(&agents, 2);
 
         // Both players claim person 9 on day 4.
         host.write_all(&encode(&Msg::Contract { person: 9, team: 1, day: 4, kind: 0 })).unwrap();
@@ -749,10 +775,10 @@ mod arbitrate_tests {
     /// Votes are tallied by the supervisor because it is the only party that sees both players.
     #[test]
     fn both_players_votes_are_counted_and_the_outcome_is_handed_to_both() {
-        let (addr, _stats) = relay_for_test();
+        let (addr, _stats, agents) = relay_for_test_with_agents();
         let mut host = agent_on(addr, Side::Host);
         let mut client = agent_on(addr, Side::Client);
-        settle();
+        wait_for_agents(&agents, 2);
 
         host.write_all(&encode(&Msg::Vote { proposal: 12, option: 1 })).unwrap();
         host.flush().unwrap();
@@ -777,10 +803,10 @@ mod arbitrate_tests {
     /// of socket are kept apart so an agent never becomes a relay target.
     #[test]
     fn an_agent_is_not_treated_as_a_replicated_state_peer() {
-        let (addr, stats) = relay_for_test();
+        let (addr, stats, agents) = relay_for_test_with_agents();
         let mut host = agent_on(addr, Side::Host);
         let mut client = agent_on(addr, Side::Client);
-        settle();
+        wait_for_agents(&agents, 2);
 
         host.write_all(&encode(&Msg::Clock { reasons: vec![1], tick: 1 })).unwrap();
         host.flush().unwrap();

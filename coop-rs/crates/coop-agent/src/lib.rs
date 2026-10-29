@@ -1118,6 +1118,20 @@ fn claim_team(team: &str, role: &str) -> Vec<(String, String)> {
     claims.clone()
 }
 
+/// Maps the UI's `role` string to a protocol side.
+///
+/// The two vocabularies overlap but are not the same thing: `role` is what this machine's player chose on the
+/// co-op screen (`host`/`client`), while `Side` is the arbitration identity the frames carry. Anything that is
+/// not `client` is treated as Host, matching `agent_side()`'s default so an unset role cannot produce a third
+/// identity.
+fn side_of(role: &str) -> coop_proto::Side {
+    if role.eq_ignore_ascii_case("client") {
+        coop_proto::Side::Client
+    } else {
+        coop_proto::Side::Host
+    }
+}
+
 /// Applies a team claim that arrived from the other machine.
 ///
 /// `team == 0` is a release. The role is the *sender's*, so this records the other player's team rather than
@@ -1230,8 +1244,14 @@ fn serve_lobby(port: u16) {
                     // Put the claim on the wire. Without this the claim only ever existed inside this
                     // process, so the other machine's team grid showed every team as free and could take
                     // one this player already held.
+                    //
+                    // The side carried is derived from `role`, not from `agent_side()`, so both machines
+                    // label the claim the same way this one stored it. They can legitimately differ - a
+                    // player who clicks Host on the client machine has `role=host` and an agent side of
+                    // Client - and sending `agent_side()` would then file the claim under one role here and
+                    // the other role there.
                     if let Ok(id) = team.parse::<u8>() {
-                        let frame = coop_proto::encode(&Msg::TeamClaim { team: id, side: agent_side() });
+                        let frame = coop_proto::encode(&Msg::TeamClaim { team: id, side: side_of(&role) });
                         queue_frame(frame);
                     }
                     ("200 OK", format!("{{\"claims\":{}}}", claims_json(&claims)))
@@ -1242,7 +1262,7 @@ fn serve_lobby(port: u16) {
                 let role = q.get("role").cloned().unwrap_or_else(|| "host".to_string());
                 let claims = release_team(&role);
                 // `team: 0` is the release marker, so the other machine clears this side's tile.
-                let frame = coop_proto::encode(&Msg::TeamClaim { team: 0, side: agent_side() });
+                let frame = coop_proto::encode(&Msg::TeamClaim { team: 0, side: side_of(&role) });
                 queue_frame(frame);
                 ("200 OK", format!("{{\"claims\":{}}}", claims_json(&claims)))
             }
@@ -2190,11 +2210,28 @@ mod tests {
         assert!(body.contains("\"callback_registered\":false"), "no callback in a test process: {body}");
     }
 
+    /// Serialises the tests that touch `CLAIMS`.
+    ///
+    /// `CLAIMS` is process-global and the test harness runs tests in parallel threads, so `release_team("host")`
+    /// in one test can run between two `claim_team` calls in another. That is a real race, not a flaky
+    /// assertion: it failed once with "McLaren is gone" purely because a sibling test released the host role
+    /// in the gap. Serialising the claim tests is the fix; retrying would only hide it.
+    static CLAIM_TEST_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    fn claims_guard() -> std::sync::MutexGuard<'static, ()> {
+        match CLAIM_TEST_LOCK.lock() {
+            Ok(g) => g,
+            Err(p) => p.into_inner(),
+        }
+    }
+
     /// Team claims must survive a round trip and must replace a role's previous claim, otherwise a player who
     /// changes their mind would appear to own two teams.
     #[test]
     fn a_team_claim_replaces_the_previous_claim_for_that_role() {
+        let _guard = claims_guard();
         let _ = release_team("host");
+        let _ = release_team("client");
         let c = claim_team("Ferrari", "host");
         assert!(c.iter().any(|(t, r)| t == "Ferrari" && r == "host"));
 
@@ -2215,6 +2252,7 @@ mod tests {
 
     #[test]
     fn claims_serialise_to_valid_json() {
+        let _guard = claims_guard();
         let _ = release_team("host");
         let c = claim_team("Red Bull Racing", "host");
         let j = claims_json(&c);
@@ -2223,6 +2261,55 @@ mod tests {
         assert!(j.contains("\"role\":\"host\""), "{j}");
         assert_eq!(j.matches('{').count(), j.matches('}').count(), "unbalanced: {j}");
         let _ = release_team("host");
+    }
+
+    /// A claim arriving from the other machine must land under *its* role and must not disturb this one's.
+    ///
+    /// This is the half that made every team look free: claims were process-local, so even with the string
+    /// compare fixed each machine only ever saw its own player. It also has to handle the release marker.
+    #[test]
+    fn a_remote_claim_is_filed_under_the_senders_role_and_releases_on_zero() {
+        let _guard = claims_guard();
+        let _ = release_team("host");
+        let _ = release_team("client");
+
+        // The far side took team 5; it must appear as the client's while the host's own pick survives.
+        let _ = claim_team("2", "host");
+        adopt_remote_claim(5, "client");
+        let claims = CLAIMS.lock().map(|c| c.clone()).unwrap_or_default();
+        assert!(claims.iter().any(|(t, r)| t == "5" && r == "client"), "{claims:?}");
+        assert!(claims.iter().any(|(t, r)| t == "2" && r == "host"), "{claims:?}");
+
+        // Changing team replaces it rather than accumulating - the same one-team-per-player rule.
+        adopt_remote_claim(7, "client");
+        let claims = CLAIMS.lock().map(|c| c.clone()).unwrap_or_default();
+        assert!(!claims.iter().any(|(t, _)| t == "5"), "the old claim must be replaced: {claims:?}");
+        assert!(claims.iter().any(|(t, r)| t == "7" && r == "client"), "{claims:?}");
+
+        // Team 0 is a release and must clear this role without touching the other.
+        adopt_remote_claim(0, "client");
+        let claims = CLAIMS.lock().map(|c| c.clone()).unwrap_or_default();
+        assert!(!claims.iter().any(|(_, r)| r == "client"), "the release must clear it: {claims:?}");
+        assert!(claims.iter().any(|(t, r)| t == "2" && r == "host"), "the host pick survives: {claims:?}");
+
+        let _ = release_team("host");
+    }
+
+    /// The UI role and the agent's own side are different things, and a claim must be filed under the role.
+    ///
+    /// They genuinely diverge: the agent reads its side from `coop_side.txt`, while `role` is what the player
+    /// clicked on the co-op screen. A player who clicks Host on the machine whose side file says `client` has
+    /// `role=host` and agent side Client. Sending the agent side would file that claim under a different role
+    /// here than on the far machine, so the two team grids would disagree about who holds what.
+    #[test]
+    fn a_team_claim_uses_the_ui_role_not_the_agent_side() {
+        assert_eq!(side_of("host"), coop_proto::Side::Host);
+        assert_eq!(side_of("client"), coop_proto::Side::Client);
+        // Case and whitespace come from localStorage, which a player can edit, so they must not produce a
+        // third identity that no arbitration rule expects.
+        assert_eq!(side_of("CLIENT"), coop_proto::Side::Client);
+        assert_eq!(side_of(""), coop_proto::Side::Host, "an unset role must default like agent_side()");
+        assert_eq!(side_of("anything-else"), coop_proto::Side::Host);
     }
 
     /// The query parser is small enough to get subtly wrong, and a wrong parse means a team claim silently

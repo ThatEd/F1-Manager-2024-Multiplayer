@@ -40,14 +40,17 @@ Nothing here needs the game. Python 3.10+, Node 16+ and a Rust toolchain are eno
 
 ```bash
 python -I run_all_tests.py          # every suite; prints ALL OK
-python -I run_all_tests.py rust     # 235 Rust tests
+python -I run_all_tests.py rust     # 237 Rust tests
 python -I run_all_tests.py e2e      # two real agents through a real supervisor, 21 assertions
 python -I run_all_tests.py teams    # one player cannot take every team
 python -I run_all_tests.py redaction   # no private identifiers in the tree
 ```
 
-Currently: **235 Rust tests, 208 JS assertions across 10 suites**, plus a publishability check that fails
-if a private path has leaked into the tree. All of it passes from a clean clone.
+Currently: **237 Rust tests**, plus 11 JavaScript suites (unit, press, observe, lobby, inert, drive,
+render, pak, teams, e2e) and the redaction check that fails if a private path has leaked into the tree.
+All of it passes from a clean clone. The runner prints each suite's own assertion count rather than one
+grand total, because two suites report `N/M passed` and two report `N passed`, and summing them across
+both spellings double-counts.
 
 Verified by cloning the published repo into an empty directory and running it there: `ALL OK (3 skipped:
 press, drive, render)`. Three suites render real components from the game's decompiled UI, so without the

@@ -54,7 +54,7 @@ def _find_share():
     if override:
         return override
     candidates = [
-        r'\\%CLIENT_HOST%\e',
+        r'\\<client-pc>\e',
         r'\\192.168.1.100\e',
         r'\\192.168.50.101\e',
         r'\\10.32.231.100\e',
@@ -66,7 +66,7 @@ def _find_share():
         except OSError:
             continue
     # Nothing resolved. Return the historical default so the error message names something concrete.
-    return r'\\%CLIENT_HOST%\e'
+    return r'\\<client-pc>\e'
 
 
 SHARE = _find_share()

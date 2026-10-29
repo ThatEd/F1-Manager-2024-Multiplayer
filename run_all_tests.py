@@ -75,6 +75,14 @@ SUITES = {}
 
 
 def suite(name, argv, cwd, predicate, needs=None):
+    # A duplicate name silently replaced the earlier registration (dict assignment), so two suites named
+    # `lobby` meant `lobby_api_test.js` never ran and nothing said so. Failing at import is the only way
+    # this stays fixed.
+    if name in SUITES:
+        raise SystemExit(
+            'duplicate suite name %r: it would replace %r and that suite would never run'
+            % (name, SUITES[name]["argv"])
+        )
     SUITES[name] = {"argv": argv, "cwd": cwd, "pass": predicate, "needs": needs}
 
 
@@ -91,22 +99,13 @@ if shutil.which("cargo"):
         lambda out: "test result: FAILED" not in out and passed_count(out, 200),
     )
 
-# ---- Publishability ----------------------------------------------------------------------------
-# Checks the tree for private identifiers (local paths with a username, hostnames, real names, tokens).
-# Registered as a suite because the README told readers to run `redaction` and the runner had no such
-# name - so the check existed, was documented, and could not be run.
-if shutil.which("python") or shutil.which("py"):
-    # The tool's contract is its exit code plus a "no private identifiers remain" line; counting
-    # "passed" lines (as the other suites do) does not apply here.
-    suite("redaction", [sys.executable, os.path.join(TOOLS, "redact_private.py"), "--check"], HERE,
-          lambda out: "no private identifiers remain" in out)
-
 if shutil.which("node"):
     # ---- JS: unit + shipping-module tests ----------------------------------------------------
     suite("unit", ["node", "run_tests.js"], HEADLESS, lambda out: passed_count(out, 40))
     suite("press", ["node", "press_test.js"], HEADLESS, lambda out: passed_count(out, 20))
     suite("observe", ["node", "observe_test.js"], HEADLESS, lambda out: passed_count(out, 60))
-    suite("lobby", ["node", "lobby_api_test.js"], HEADLESS, lambda out: passed_count(out, 20))
+    # `lobby_api_test.js` exercises the Steam-lobby HTTP endpoints and FFI signatures.
+    suite("steam", ["node", "lobby_api_test.js"], HEADLESS, lambda out: passed_count(out, 20))
     suite("inert", ["node", "normal_play_test.js"], HEADLESS, lambda out: passed_count(out, 18))
     # ---- JS: tests that need the headless DOM built from the UI export -----------------------
     # These skip themselves with a named reason rather than failing, so a clone without the export
@@ -116,7 +115,12 @@ if shutil.which("node"):
     # The entry point a player interacts with. Nothing covered this until "no multiplayer button" was
     # reported against two builds: every other suite tests a module, and nobody had tested whether the
     # module that draws the button can actually reach the menu.
-    suite("lobby", ["node", "lobby_boot_test.js"], HEADLESS, lambda out: passed_count(out, 12))
+    #
+    # Named `boot`, not `lobby`. It was `lobby` while `lobby_api_test.js` was also `lobby`, and because
+    # `SUITES` is a dict with no duplicate check the second registration silently replaced the first -
+    # so the Steam endpoint suite had not run for as long as both existed. The runner now rejects a
+    # duplicate name, but the distinct names are what make the output readable.
+    suite("boot", ["node", "lobby_boot_test.js"], HEADLESS, lambda out: passed_count(out, 12))
     # Whether the game can resolve what is in the pak at all. This is the check that was missing when the
     # button failed: every other check asked "was the pak built from the right files", none asked "will the
     # game find them", and a pak with bare entry paths loads and overrides nothing.
@@ -150,11 +154,17 @@ def build_supervisor():
     return ""
 
 
-    # ---- Publishability: nothing private has leaked into the tree -----------------------------
-    # This is a test, not a chore. The bundle is published under the owner's GitHub account, and a
-    # personal path in a doc is exactly the kind of thing that survives review because nobody
-    # re-reads a 150 KB write-up. The checker fails if any identifier remains, so a future edit that
-    # pastes a log line in cannot ship.
+# ---- Publishability: nothing private has leaked into the tree ---------------------------------
+# This is a test, not a chore. The bundle is published under the owner's GitHub account, and a personal
+# path in a doc is exactly the kind of thing that survives review because nobody re-reads a 150 KB
+# write-up. The checker fails if any identifier remains, so a future edit that pastes a log line in
+# cannot ship.
+#
+# This block used to sit *inside* `build_supervisor` after its `return ""`, so it never executed and
+# `redaction` was not a registered suite: the README told readers to run it, and the runner answered
+# "no such suite". The check itself still worked when invoked directly, which is why the docs looked
+# right. Registering it at module level is what makes `python -I run_all_tests.py` cover it.
+if shutil.which("python") or shutil.which("py"):
     suite("redaction", [sys.executable, "-I", os.path.join(TOOLS, "redact_private.py"), "--check"],
           HERE, lambda out: "no private identifiers remain" in out)
 
