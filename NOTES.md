@@ -1189,7 +1189,7 @@ RcClock 0xA0458C, plus per-car Lap 0x7E4 / LapT 0x7E8 / Dist 0x194).
   owner install  Mods/CoopDiagMod/Scripts/coop_role.txt = "host"
   test  install  Mods/CoopDiagMod/Scripts/coop_role.txt = "client"
 HOST publishes the whole field every tick to
-  E:/Downloads/coop-anything-main/local/f1-manager-2024/coop_state.txt
+  <project work dir>/coop_state.txt
 CLIENT reads it every tick and writes Dist+Lat into its own 22 car records.
 
 Wire format (582 bytes, one write call):

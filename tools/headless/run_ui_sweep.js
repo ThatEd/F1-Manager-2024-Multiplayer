@@ -258,7 +258,7 @@ async function main() {
   if (jsonPath) {
     const report = {
       generatedAt: new Date().toISOString(),
-      source: 'E:/FModel/Output/Exports/F1Manager24/Content/UIGameface/js',
+      source: 'UIGameface/js',
       method: 'one process per screen; app booted, real navigation event fired, own render() counted',
       total: all.length,
       rendered: pass,

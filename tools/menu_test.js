@@ -23,7 +23,11 @@ const path = require("path");
 const vm = require("vm");
 
 const PAK_ROOT = path.join(__dirname, "..", "pak", "f1manager24", "Content", "UIGameface");
-const EXPORT_ROOT = "E:/FModel/Output/Exports/F1Manager24/Content/UIGameface";
+const CONTENT_ROOT =
+  process.env.F1M_UI_EXPORT ||
+  process.env.F1M_EXPORT ||
+  String.raw`E:\FModel\Output\Exports\F1Manager24\Content`;
+const EXPORT_ROOT = path.join(CONTENT_ROOT, "UIGameface");
 const LOBBY = path.join(PAK_ROOT, "js", "coop", "lobby.js");
 
 let failures = 0;
