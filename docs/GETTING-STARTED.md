@@ -60,7 +60,8 @@ here with no extra configuration.
 - **The UI mod does nothing when nobody is hosting.** It probes, gives up, and stops. Measured:
   ~17 loopback attempts per 10 idle minutes, then silence (`docs/NORMAL-PLAY.md`).
 - **`Continue` and `Load` work.** Both press the real controls; both were proven in a running game.
-- **A race cannot be started from outside yet.** This is the blocker for everything downstream.
+- **A race cannot be started from outside yet.** Not because session start is unmapped — it is mapped
+  from the exe — but because it is not in the UI layer (see Part 2).
 
 ---
 
@@ -81,15 +82,34 @@ clone without a decompiled copy is green-with-visible-gaps rather than red.
 
 ### The one thing to fix first
 
-**Starting a race session from outside.** Everything downstream is blocked on it:
+**Starting a race session from outside.** Everything downstream is blocked on it — but the framing
+matters, because the usual summary ("no event starts a race") is wrong in a way that sends people at the
+wrong layer.
 
-- No Gameface event starts the sim. The pre-session confirm emits only `PreSessionClosed`.
-- The race sim object exists and is readable, but sits at `simtime = 0` until a human clicks.
-- `docs/UI-COMMANDS.md` has the full evidence, including the six event names present in the binary but
-  absent from the UI (one of them, `StageProceed`, looks like a candidate).
+What is actually true:
 
-If you solve this, the rest of the pieces can be tested for the first time. If you conclude it cannot
-be solved from the UI side, that is also a result worth writing down — say so and why.
+- **Session start is not a UI event, and that is expected.** Starting a session is what the *advance
+  weekend* button does. The UI event for it, `PreSessionClosed` (`PresessionView.js:250`), only means
+  "this dialog is done" — it closes a screen, it does not start a sim.
+- **The exe contains the stage machinery the UI never calls.** `StageProceed` (`0x5fa7c98`) sits
+  immediately beside `SessionOverviewClosed`, `AdvanceToNextStage` and `PreSessionClosed` in the
+  session-flow binding block; `TravelToRaceWeekend` (`0x5fcac28`) is the only "travel to race weekend"
+  name anywhere. Neither has a sender in the entire UI export — they are entry points the shipping UI
+  reaches some other way, most plausibly from native code.
+- **So the work is not "find an event" — it is "fire the right command and see what moves."** The race
+  sim object exists and is readable and sits at `simtime = 0` until a human clicks.
+
+The unrun test plan, in order, is in [UI-COMMANDS.md](UI-COMMANDS.md):
+
+1. `engine.trigger('StageProceed')` from a genuine pre-session screen — the cheapest thing to try, and it
+   may move the stage without the dialog-dismissal precondition.
+2. `engine.trigger('TravelToRaceWeekend')` from TeamManagement when the calendar's next event is a race.
+3. Only then, decompile the handler that references the `StageProceed` string at `0x5fa7c98` and read
+   what it validates before advancing.
+
+**What each handler does is `unknown`** — the exe was read as a byte-string source, not decompiled, so
+these are labelled leads with offsets, not findings. If you conclude it cannot be driven from the UI
+side at all, that is also a result worth writing down — say so and why.
 
 ### How to add a feature without breaking the honest-state rule
 

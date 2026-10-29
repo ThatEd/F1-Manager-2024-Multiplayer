@@ -68,6 +68,9 @@ If a page says "works", there is a test run behind it. If it says "should work",
 - **`coop-mem --test loop_stub_volume` crashes `0xC0000005`.** Pre-existing, reproducible on a bare
   `cargo test --workspace`, does not reproduce under `--test stub_execution`, and the crate is not on
   the co-op path. `run_all_tests.py` excludes it by name rather than hiding it.
-- **The race-start gap is not a defect but a hole.** No Gameface event starts a session; see the
-  "Starting a race session" section of [UI-COMMANDS.md](UI-COMMANDS.md). Any plan that assumes a race
-  can be started from outside is wrong until that is solved.
+- **The race-start gap is a layering fact, not a missing name.** Session start is mapped from the exe
+  (`StageProceed` `0x5fa7c98`, `TravelToRaceWeekend` `0x5fcac28`) but is not part of the UI layer —
+  starting a session is what the advance-weekend button does, and the UI's own `PreSessionClosed` only
+  dismisses a dialog. The commands exist and have no sender in the export; they have not been fired yet.
+  See the "Starting a race session" section of [UI-COMMANDS.md](UI-COMMANDS.md). Any plan that assumes a
+  race can be started with a UI event is wrong until one of those is tried.

@@ -945,7 +945,14 @@ onMonthDown = (isRepeatPress, e) => {
 ### 3.5 Starting a race session — the answer
 
 **There is no Gameface event that starts a race session.** This is a proven statement about the
-export, not a failure to find one:
+export, not a failure to find one — and it is a statement about **the UI layer only**.
+
+Read it precisely, because the loose version of it is misleading: session start *is* mapped from the
+exe. §3.5.1 lists the session-flow commands the binary contains and the UI never sends
+(`StageProceed` at `0x5fa7c98`, `TravelToRaceWeekend` at `0x5fcac28`). Starting a session is what the
+**advance weekend button** does, not a standalone event, so the absence of a "start" event in the UI is
+expected rather than surprising. What follows is the evidence that no *UI* event does it, and §3.5.1 is
+where the untried candidates are.
 
 1. The two events named in the brief's hypothesis are not session starts.
    `AdvanceToNextEvent` is a TeamManagement calendar-advance (§3.3) and its only raising

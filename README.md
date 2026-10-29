@@ -17,7 +17,7 @@ launched with this code. Everything below reflects what has been *run*, not what
 |---|---|---|
 | UI command surface | **Mapped.** 352 events across 517 call sites; `engine.trigger` proven to be the single choke point | [docs/UI-COMMANDS.md](docs/UI-COMMANDS.md) |
 | Driving the UI from outside | **Works.** Pressing real controls emits the real events; `Continue` and `Load` proven live in-game on the host machine | [docs/CLIENT-UI-PRESS.md](docs/CLIENT-UI-PRESS.md) |
-| Starting a race session | **Not solved.** No Gameface event starts the sim; the pre-session confirm emits only `PreSessionClosed` | [docs/UI-COMMANDS.md](docs/UI-COMMANDS.md) |
+| Starting a race session | **Not solved, but the lever is identified.** The *UI layer* has no event that starts a sim — the pre-session confirm emits only `PreSessionClosed`. The exe, though, contains session-flow commands the UI never sends: **`StageProceed`** (`0x5fa7c98`, inside the `SessionOverviewClosed`/`AdvanceToNextStage`/`PreSessionClosed` block) and `TravelToRaceWeekend` (`0x5fcac28`). Untried | [docs/UI-COMMANDS.md](docs/UI-COMMANDS.md) |
 | Car state replication | **Code complete, unrun.** Protocol, layout, mailbox and hook all tested; the hook has never fired in a live race | [docs/RACESIM-HIJACK.md](docs/RACESIM-HIJACK.md) |
 | Shared clock (both players pause together) | **Code complete, unrun.** Union rule unit-tested; the far side calls `SimPauseChange` on receipt. Never seen in a game | [docs/COORDINATION.md](docs/COORDINATION.md) |
 | One contract per person per day | **Code complete, unrun.** Arbitration tested in the supervisor, never exercised by two live clients | [docs/COORDINATION.md](docs/COORDINATION.md) |
@@ -176,8 +176,14 @@ because nobody re-reads a 150 KB write-up. It fails the run if any identifier re
 
 ## What is not here
 
-- **A working race start.** The single biggest gap. No Gameface event begins a session; the blocker
-  and the evidence are in [docs/UI-COMMANDS.md](docs/UI-COMMANDS.md).
+- **A working race start.** The single biggest gap — but not for the reason it is usually summarised as.
+  Session starts *are* mapped from the exe; they are simply not part of the **UI** layer, because
+  starting a session is what the advance-weekend button does. The UI's own event for that,
+  `PreSessionClosed`, only means "this dialog is done". The commands that read as the actual stage
+  machinery — `StageProceed` (`0x5fa7c98`) and `TravelToRaceWeekend` (`0x5fcac28`) — are present in the
+  binary's session-flow binding block and have **no sender anywhere in the UI export**. They are the
+  strongest lead and nobody has fired them yet; what each handler *does* is `unknown` because the bodies
+  were not decompiled. Evidence and the unrun test plan: [docs/UI-COMMANDS.md](docs/UI-COMMANDS.md).
 - **Any verification of the coordination layer against a live game.** See the table at the top.
 - **A one-click installer.** Deployment is `deploy_pak.py` plus an injected DLL; see
   [docs/RACE-SYNC-RUNBOOK.md](docs/RACE-SYNC-RUNBOOK.md).
