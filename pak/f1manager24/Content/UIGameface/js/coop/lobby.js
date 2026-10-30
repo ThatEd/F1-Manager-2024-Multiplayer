@@ -121,6 +121,33 @@
         });
     }
 
+    // The pak and the DLL are deployed separately, so they can disagree. Check the agent's build first: a
+    // route the pak calls but the DLL does not serve used to reach the player as "HTTP 404" in the status
+    // line, which reads as a broken mod rather than "the DLL is older than the pak". One known route is
+    // enough - if it 404s, the agent predates this pak and no other endpoint can be trusted either.
+    function checkAgentBuild(onOk, onStale) {
+        var xr = new XMLHttpRequest();
+        xr.open("GET", url("/coop/version"), true);
+        xr.timeout = 4000;
+        xr.onreadystatechange = function () {
+            if (xr.readyState !== 4) return;
+            if (xr.status === 404) {
+                onStale("the co-op agent in this game is older than this UI mod (it does not serve "
+                    + "/coop/version). Restart the game after deploying the current coop_agent.dll - a "
+                    + "loaded DLL cannot be replaced while the game is running.");
+                return;
+            }
+            if (xr.status !== 200) {
+                onStale("no answer from the co-op agent (HTTP " + xr.status + ")");
+                return;
+            }
+            var body = {};
+            try { body = JSON.parse(xr.responseText || "{}"); } catch (e) { body = {}; }
+            onOk(body.build || "unknown");
+        };
+        try { xr.send(); } catch (e) { onStale("the co-op agent is not reachable: " + e); }
+    }
+
     // ------------------------------------------------------------------ css
 
     // The screen is built from the game's own components and so needs almost no CSS. What is here is
@@ -570,6 +597,18 @@
             } catch (e) {
                 log("re-arm failed: " + e);
             }
+
+            // Build first: a pak that expects routes the injected DLL does not have is the failure that shows
+            // up as a bare 404, and it is indistinguishable from a broken mod unless it is named.
+            checkAgentBuild(
+                function (build) {
+                    log("agent build " + build);
+                },
+                function (why) {
+                    self.setState({ armed: false });
+                    self.setStatus(why, true);
+                }
+            );
 
             agent("status", "GET")
                 .then(function (st) {

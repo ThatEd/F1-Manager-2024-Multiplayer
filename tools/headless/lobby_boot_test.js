@@ -165,6 +165,21 @@ console.log('\nmode list and race replay');
     'the tile uses the Exclusive Scenarios texture, as asked');
   ok(/MainMenu_coopMode/.test(lobbySrc), 'the tile carries a hook class for the purple treatment');
   ok(/CoopPurple|hue-rotate/.test(lobbySrc), 'the purple is applied by CSS, not a separate texture');
+
+  /* A pak and the agent DLL are deployed separately, so they drift. When the pak called a route the injected
+   * DLL did not serve, the player saw a bare "HTTP 404" and it read as a broken mod. The screen must probe the
+   * agent's build first and name a stale DLL as the cause. */
+  ok(/\/coop\/version/.test(lobbySrc), 'the screen probes the agent build before using it');
+  ok(/older than this UI mod/.test(lobbySrc),
+    'a 404 from the version probe is reported as an out-of-date DLL, not a generic failure');
+  /* Order matters, not just presence: the probe has to run before the status request, or a stale DLL is
+   * reported as a hook problem. Measured offsets put it ~790 chars after `componentDidMount`, so the window
+   * has to be wider than that - a too-tight window fails on correct code, which is a bad test. */
+  ok(/checkAgentBuild\(/.test(lobbySrc) && /componentDidMount[\s\S]{0,2000}checkAgentBuild\(/.test(lobbySrc),
+    'the probe runs on mount');
+  ok(lobbySrc.indexOf('checkAgentBuild(', lobbySrc.indexOf('componentDidMount')) <
+     lobbySrc.indexOf('agent("status"', lobbySrc.indexOf('componentDidMount')),
+    'the build probe runs before the status request');
 }
 
 // ---------------------------------------------------------------------------------------------

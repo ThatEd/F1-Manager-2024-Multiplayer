@@ -1185,6 +1185,193 @@ fn claims_json(claims: &[(String, String)]) -> String {
 /// that job here means the client needs **one pak** and no extra executable for hosting.
 ///
 /// Requests are tiny and strictly enumerated; this is not a general HTTP server.
+/// The endpoint table, as a function of the request, so tests drive the **same** routes the thread does.
+///
+/// It was previously inlined in the `for incoming in listener.incoming()` loop, and the test that claimed to
+/// cover this endpoint re-implemented three of the arms in its own `match`. A re-implementation cannot fail
+/// when the real table and the front-end disagree, which is the one thing such a test has to catch, so the
+/// table now lives here and the thread and the test both call it.
+fn route_endpoint(method: &str, path: &str) -> (&'static str, String) {
+    match (method, path) {
+        ("GET", "/coop/status") => ("200 OK", lobby_status_body()),
+        // The one route that exists in every build, deliberately. If the front-end gets a 404 here, the thing
+        // answering on this port is not this mod's agent at all - a fact no other endpoint can distinguish
+        // from "the DLL is old".
+        ("GET", "/coop/version") => (
+            "200 OK",
+            format!("{{\"build\":\"{}\",\"proto\":{}}}", build_id(), coop_proto::VERSION),
+        ),
+        ("POST", "/coop/host") => ("200 OK", lobby_host_body()),
+        ("POST", "/coop/join") => ("200 OK", lobby_join_body()),
+        ("GET", "/coop/teams") => {
+            let claims = match CLAIMS.lock() {
+                Ok(c) => c.clone(),
+                Err(p) => p.into_inner().clone(),
+            };
+            ("200 OK", format!("{{\"claims\":{}}}", claims_json(&claims)))
+        }
+        // Claims carry the team name in the query string, e.g. `/coop/claim?team=Ferrari&role=host`.
+        // A query string rather than a body: the caller is a small piece of front-end code and this keeps
+        // both the client and the server trivial, with no body parsing to get wrong.
+        (m, p) if p.starts_with("/coop/claim") && (m == "POST" || m == "GET") => {
+            let q = query_of(p);
+            let team = q.get("team").cloned().unwrap_or_default();
+            let role = q.get("role").cloned().unwrap_or_else(|| "host".to_string());
+            if team.is_empty() {
+                ("400 Bad Request", "{\"error\":\"team is required\"}".to_string())
+            } else {
+                let claims = claim_team(&team, &role);
+                // Put the claim on the wire. Without this the claim only ever existed inside this
+                // process, so the other machine's team grid showed every team as free and could take
+                // one this player already held.
+                //
+                // The side carried is derived from `role`, not from `agent_side()`, so both machines
+                // label the claim the same way this one stored it. They can legitimately differ - a
+                // player who clicks Host on the client machine has `role=host` and an agent side of
+                // Client - and sending `agent_side()` would then file the claim under one role here and
+                // the other role there.
+                if let Ok(id) = team.parse::<u8>() {
+                    let frame = coop_proto::encode(&Msg::TeamClaim { team: id, side: side_of(&role) });
+                    queue_frame(frame);
+                }
+                ("200 OK", format!("{{\"claims\":{}}}", claims_json(&claims)))
+            }
+        }
+        (m, p) if p.starts_with("/coop/release") => {
+            let q = query_of(p);
+            let role = q.get("role").cloned().unwrap_or_else(|| "host".to_string());
+            let claims = release_team(&role);
+            // `team: 0` is the release marker, so the other machine clears this side's tile.
+            let frame = coop_proto::encode(&Msg::TeamClaim { team: 0, side: side_of(&role) });
+            queue_frame(frame);
+            ("200 OK", format!("{{\"claims\":{}}}", claims_json(&claims)))
+        }
+        // Coordination: the front-end reports what a player just did, and the agent turns it into a
+        // frame the supervisor arbitrates. GET is accepted alongside POST because the caller is
+        // `XMLHttpRequest` in the game's web view, where a preflight is one more thing to get wrong
+        // for no benefit - these requests are idempotent reports, not commands to a shared resource.
+        (m, p) if p.starts_with("/coop/coordinate") && (m == "POST" || m == "GET") => {
+            let after = p.trim_start_matches("/coop/coordinate");
+            let after = after.strip_prefix('/').unwrap_or(after);
+            let (kind, rest) = match after.split_once('?') {
+                Some((k, r)) => (k, r),
+                None => (after, ""),
+            };
+            let q = query_of(&format!("?{rest}"));
+            match coord::parse_request(kind, &q) {
+                Ok(req) => match coord::frame_for(&req) {
+                    Ok(frame) => {
+                        let desc = format!("{req:?}");
+                        // Our own reasons are recorded here as well as sent, so the gate has both sides
+                        // and the union is computable locally. Recording only what arrives would leave
+                        // this machine's own pause invisible to its own clock state.
+                        if let coord::Request::Clock { ref reasons } = req {
+                            clock_with(|c| c.set_local_bytes(reasons));
+                        }
+                        let kept = queue_frame(frame);
+                        log(&format!("coordinated {desc} (queued, {} pending)", outbox_len()));
+                        // 202: accepted for delivery. The idle state is reported rather than
+                        // hidden, because "queued but the supervisor is not running" is the single
+                        // most likely reason a coordination rule appears to do nothing.
+                        (
+                            "202 Accepted",
+                            format!(
+                                "{{\"queued\":true,\"pending\":{},\"superseded\":{},\
+                                  \"supervisor\":{}}}",
+                                outbox_len(),
+                                !kept,
+                                connected()
+                            ),
+                        )
+                    }
+                    Err(why) => (
+                        "400 Bad Request",
+                        format!("{{\"error\":\"{}\"}}", why.message()),
+                    ),
+                },
+                Err(why) => (
+                    "400 Bad Request",
+                    format!("{{\"error\":\"{}\"}}", why.message()),
+                ),
+            }
+        }
+        // What the supervisor last told us: a refused claim, or a resolved vote. The front-end shows
+        // it so a losing player is told why, instead of watching a signing do nothing.
+        ("GET", "/coop/inbox") => {
+            let lines: Vec<String> = inbox_lines()
+                .iter()
+                .map(|l| format!("\"{}\"", l.replace('\\', "\\\\").replace('"', "\\\"")))
+                .collect();
+            ("200 OK", format!("{{\"lines\":[{}],\"pending\":{}}}", lines.join(","), outbox_len()))
+        }
+        // The combined clock state, driven by the host tab.
+        //
+        // `seq` is what the front-end keys on. Acting on every poll would re-pause a paused world
+        // forever; acting on a new `seq` acts exactly once per transition. See `clocksync`.
+        ("GET", "/coop/relay") => ("200 OK", relay_body()),
+        // Steam lobby, as a friend's client would see it.
+        //
+        // Read-only: reports the mod's intent (`state`) and Steam's reality (`lobby_id`) side by side, so
+        // "the host tab is open but nothing is advertised" is distinguishable from "hosting and joinable".
+        ("GET", "/coop/lobby") => ("200 OK", lobby_body()),
+        // The host screen drives this: `waiting` when it mounts, `idle` when it leaves. Steam's own
+        // guidance is to create a lobby only when something needs one, so the lobby's lifetime is the tab's.
+        (m, p) if p.starts_with("/coop/lobby/set") && (m == "POST" || m == "GET") => {
+            let q = query_of(p);
+            ("200 OK", lobby_set(q.get("state").map(String::as_str).unwrap_or("waiting")))
+        }
+        // Joining a friend. `lobby=<id>` after a "Join Game" click (Steam hands us the id through a
+        // callback), or `friend=<steamid64>` to look up their lobby via GetFriendGamePlayed.
+        (m, p) if p.starts_with("/coop/lobby/join") && (m == "POST" || m == "GET") => {
+            let q = query_of(p);
+            ("200 OK", lobby_join(&q))
+        }
+        // The `+connect_lobby <id>` Steam launches the game with when an invite is accepted while the game
+        // is closed. Read once by the front-end so launching from an invite actually joins.
+        ("GET", "/coop/connectlobby") => ("200 OK", connect_lobby_body()),
+        // Opens Steam's own "invite a friend" overlay for our lobby.
+        //
+        // This is the step that makes "Steam invites do not work" observable at all: `InviteUserToLobby`
+        // needs a friend's SteamID chosen in advance, while the overlay lets the player pick, and Valve's
+        // guidance is to create the lobby and then let Steam present the friend list. Without an endpoint
+        // that calls it, nothing in the mod ever opened the dialog, so there was no way to send an invite
+        // by hand either.
+        (m, p) if p.starts_with("/coop/lobby/invite") && (m == "POST" || m == "GET") => {
+            ("200 OK", lobby_invite())
+        }
+        ("GET", "/coop/clock") => {                let v = clock_with(|c| c.view());
+            let reasons = clock_with(|c| c.reasons());
+            (
+                "200 OK",
+                format!(
+                    "{{\"seq\":{},\"action\":\"{}\",\"stopped\":{},\"local\":[{}],\
+                      \"remote\":[{}],\"reasons\":[{}],\"side\":\"{}\"}}",
+                    v.seq,
+                    v.action,
+                    v.stopped,
+                    v.local.iter().map(|r| r.to_string()).collect::<Vec<_>>().join(","),
+                    v.remote.iter().map(|r| r.to_string()).collect::<Vec<_>>().join(","),
+                    reasons.iter().map(|r| r.to_string()).collect::<Vec<_>>().join(","),
+                    match agent_side() {
+                        coop_proto::Side::Host => "host",
+                        coop_proto::Side::Client => "client",
+                    }
+                ),
+            )
+        }
+        // Say what was asked for. "no such endpoint" with no path was unhelpful when a request came back 404:
+        // the front-end's path and the agent's table have to be compared by hand otherwise, and a path built
+        // with a query string (`/coop/claim?team=4&role=host`) is a different string from the table's entry.
+        _ => (
+            "404 Not Found",
+            format!(
+                "{{\"error\":\"no such endpoint\",\"method\":\"{method}\",\"path\":\"{}\"}}",
+                path.replace('\\', "\\\\").replace('"', "\\\"")
+            ),
+        ),
+    }
+}
+
 fn serve_lobby(port: u16) {
     use std::io::{BufRead, BufReader, Write};
     use std::net::TcpListener;
@@ -1219,168 +1406,7 @@ fn serve_lobby(port: u16) {
         let method = parts.next().unwrap_or("");
         let path = parts.next().unwrap_or("");
 
-        let (code, body) = match (method, path) {
-            ("GET", "/coop/status") => ("200 OK", lobby_status_body()),
-            ("POST", "/coop/host") => ("200 OK", lobby_host_body()),
-            ("POST", "/coop/join") => ("200 OK", lobby_join_body()),
-            ("GET", "/coop/teams") => {
-                let claims = match CLAIMS.lock() {
-                    Ok(c) => c.clone(),
-                    Err(p) => p.into_inner().clone(),
-                };
-                ("200 OK", format!("{{\"claims\":{}}}", claims_json(&claims)))
-            }
-            // Claims carry the team name in the query string, e.g. `/coop/claim?team=Ferrari&role=host`.
-            // A query string rather than a body: the caller is a small piece of front-end code and this keeps
-            // both the client and the server trivial, with no body parsing to get wrong.
-            (m, p) if p.starts_with("/coop/claim") && (m == "POST" || m == "GET") => {
-                let q = query_of(p);
-                let team = q.get("team").cloned().unwrap_or_default();
-                let role = q.get("role").cloned().unwrap_or_else(|| "host".to_string());
-                if team.is_empty() {
-                    ("400 Bad Request", "{\"error\":\"team is required\"}".to_string())
-                } else {
-                    let claims = claim_team(&team, &role);
-                    // Put the claim on the wire. Without this the claim only ever existed inside this
-                    // process, so the other machine's team grid showed every team as free and could take
-                    // one this player already held.
-                    //
-                    // The side carried is derived from `role`, not from `agent_side()`, so both machines
-                    // label the claim the same way this one stored it. They can legitimately differ - a
-                    // player who clicks Host on the client machine has `role=host` and an agent side of
-                    // Client - and sending `agent_side()` would then file the claim under one role here and
-                    // the other role there.
-                    if let Ok(id) = team.parse::<u8>() {
-                        let frame = coop_proto::encode(&Msg::TeamClaim { team: id, side: side_of(&role) });
-                        queue_frame(frame);
-                    }
-                    ("200 OK", format!("{{\"claims\":{}}}", claims_json(&claims)))
-                }
-            }
-            (m, p) if p.starts_with("/coop/release") => {
-                let q = query_of(p);
-                let role = q.get("role").cloned().unwrap_or_else(|| "host".to_string());
-                let claims = release_team(&role);
-                // `team: 0` is the release marker, so the other machine clears this side's tile.
-                let frame = coop_proto::encode(&Msg::TeamClaim { team: 0, side: side_of(&role) });
-                queue_frame(frame);
-                ("200 OK", format!("{{\"claims\":{}}}", claims_json(&claims)))
-            }
-            // Coordination: the front-end reports what a player just did, and the agent turns it into a
-            // frame the supervisor arbitrates. GET is accepted alongside POST because the caller is
-            // `XMLHttpRequest` in the game's web view, where a preflight is one more thing to get wrong
-            // for no benefit - these requests are idempotent reports, not commands to a shared resource.
-            (m, p) if p.starts_with("/coop/coordinate") && (m == "POST" || m == "GET") => {
-                let after = p.trim_start_matches("/coop/coordinate");
-                let after = after.strip_prefix('/').unwrap_or(after);
-                let (kind, rest) = match after.split_once('?') {
-                    Some((k, r)) => (k, r),
-                    None => (after, ""),
-                };
-                let q = query_of(&format!("?{rest}"));
-                match coord::parse_request(kind, &q) {
-                    Ok(req) => match coord::frame_for(&req) {
-                        Ok(frame) => {
-                            let desc = format!("{req:?}");
-                            // Our own reasons are recorded here as well as sent, so the gate has both sides
-                            // and the union is computable locally. Recording only what arrives would leave
-                            // this machine's own pause invisible to its own clock state.
-                            if let coord::Request::Clock { ref reasons } = req {
-                                clock_with(|c| c.set_local_bytes(reasons));
-                            }
-                            let kept = queue_frame(frame);
-                            log(&format!("coordinated {desc} (queued, {} pending)", outbox_len()));
-                            // 202: accepted for delivery. The idle state is reported rather than
-                            // hidden, because "queued but the supervisor is not running" is the single
-                            // most likely reason a coordination rule appears to do nothing.
-                            (
-                                "202 Accepted",
-                                format!(
-                                    "{{\"queued\":true,\"pending\":{},\"superseded\":{},\
-                                      \"supervisor\":{}}}",
-                                    outbox_len(),
-                                    !kept,
-                                    connected()
-                                ),
-                            )
-                        }
-                        Err(why) => (
-                            "400 Bad Request",
-                            format!("{{\"error\":\"{}\"}}", why.message()),
-                        ),
-                    },
-                    Err(why) => (
-                        "400 Bad Request",
-                        format!("{{\"error\":\"{}\"}}", why.message()),
-                    ),
-                }
-            }
-            // What the supervisor last told us: a refused claim, or a resolved vote. The front-end shows
-            // it so a losing player is told why, instead of watching a signing do nothing.
-            ("GET", "/coop/inbox") => {
-                let lines: Vec<String> = inbox_lines()
-                    .iter()
-                    .map(|l| format!("\"{}\"", l.replace('\\', "\\\\").replace('"', "\\\"")))
-                    .collect();
-                ("200 OK", format!("{{\"lines\":[{}],\"pending\":{}}}", lines.join(","), outbox_len()))
-            }
-            // The combined clock state, driven by the host tab.
-            //
-            // `seq` is what the front-end keys on. Acting on every poll would re-pause a paused world
-            // forever; acting on a new `seq` acts exactly once per transition. See `clocksync`.
-            ("GET", "/coop/relay") => ("200 OK", relay_body()),
-            // Steam lobby, as a friend's client would see it.
-            //
-            // Read-only: reports the mod's intent (`state`) and Steam's reality (`lobby_id`) side by side, so
-            // "the host tab is open but nothing is advertised" is distinguishable from "hosting and joinable".
-            ("GET", "/coop/lobby") => ("200 OK", lobby_body()),
-            // The host screen drives this: `waiting` when it mounts, `idle` when it leaves. Steam's own
-            // guidance is to create a lobby only when something needs one, so the lobby's lifetime is the tab's.
-            (m, p) if p.starts_with("/coop/lobby/set") && (m == "POST" || m == "GET") => {
-                let q = query_of(p);
-                ("200 OK", lobby_set(q.get("state").map(String::as_str).unwrap_or("waiting")))
-            }
-            // Joining a friend. `lobby=<id>` after a "Join Game" click (Steam hands us the id through a
-            // callback), or `friend=<steamid64>` to look up their lobby via GetFriendGamePlayed.
-            (m, p) if p.starts_with("/coop/lobby/join") && (m == "POST" || m == "GET") => {
-                let q = query_of(p);
-                ("200 OK", lobby_join(&q))
-            }
-            // The `+connect_lobby <id>` Steam launches the game with when an invite is accepted while the game
-            // is closed. Read once by the front-end so launching from an invite actually joins.
-            ("GET", "/coop/connectlobby") => ("200 OK", connect_lobby_body()),
-            // Opens Steam's own "invite a friend" overlay for our lobby.
-            //
-            // This is the step that makes "Steam invites do not work" observable at all: `InviteUserToLobby`
-            // needs a friend's SteamID chosen in advance, while the overlay lets the player pick, and Valve's
-            // guidance is to create the lobby and then let Steam present the friend list. Without an endpoint
-            // that calls it, nothing in the mod ever opened the dialog, so there was no way to send an invite
-            // by hand either.
-            (m, p) if p.starts_with("/coop/lobby/invite") && (m == "POST" || m == "GET") => {
-                ("200 OK", lobby_invite())
-            }
-            ("GET", "/coop/clock") => {                let v = clock_with(|c| c.view());
-                let reasons = clock_with(|c| c.reasons());
-                (
-                    "200 OK",
-                    format!(
-                        "{{\"seq\":{},\"action\":\"{}\",\"stopped\":{},\"local\":[{}],\
-                          \"remote\":[{}],\"reasons\":[{}],\"side\":\"{}\"}}",
-                        v.seq,
-                        v.action,
-                        v.stopped,
-                        v.local.iter().map(|r| r.to_string()).collect::<Vec<_>>().join(","),
-                        v.remote.iter().map(|r| r.to_string()).collect::<Vec<_>>().join(","),
-                        reasons.iter().map(|r| r.to_string()).collect::<Vec<_>>().join(","),
-                        match agent_side() {
-                            coop_proto::Side::Host => "host",
-                            coop_proto::Side::Client => "client",
-                        }
-                    ),
-                )
-            }
-            _ => ("404 Not Found", "{\"error\":\"no such endpoint\"}".to_string()),
-        };
+        let (code, body) = route_endpoint(method, path);
 
         // CORS: Gameface is not served from http://127.0.0.1, so without these headers the fetch fails and
         // the menu button silently does nothing. `*` is safe here because the server only listens on
@@ -1443,6 +1469,19 @@ fn query_of(path: &str) -> std::collections::HashMap<String, String> {
     out
 }
 
+/// The agent's own build identity, reported by `/coop/status` and compared by the front-end.
+///
+/// The pak and the DLL are deployed separately, so they *do* drift: this session ran a pak that called
+/// `/coop/lobby/invite` against an agent that did not serve it, and the only symptom was a bare "HTTP 404"
+/// in the status line - which reads as a broken mod rather than "the DLL is older than the pak". A build id
+/// on both sides turns that into one sentence the player can act on.
+///
+/// The value is the crate version plus the protocol version, because those are the two things that must
+/// match for the two halves to talk to each other at all.
+pub fn build_id() -> String {
+    format!("{}+proto{}", env!("CARGO_PKG_VERSION"), coop_proto::VERSION)
+}
+
 /// JSON for `GET /coop/status`, so the menu can show the real state rather than guess.
 fn lobby_status_body() -> String {
     let block = hook::block();
@@ -1450,14 +1489,15 @@ fn lobby_status_body() -> String {
     let tyre = tyre_mode();
     format!(
         "{{\"injected\":{},\"hook_installed\":{},\"callback_registered\":{},\"hook_fires\":{},\
-          \"tyre_mode\":\"{}\",\"write_port\":{},\"pid\":{}}}",
+          \"tyre_mode\":\"{}\",\"write_port\":{},\"pid\":{},\"build\":\"{}\"}}",
         true,
         block.is_some(),
         cb != 0,
         fires,
         tyre.as_str(),
         write_port(),
-        std::process::id()
+        std::process::id(),
+        build_id()
     )
 }
 
@@ -1828,6 +1868,22 @@ pub fn start(supervisor: &str) {
 #[cfg(windows)]
 extern "system" fn thread_entry(_param: *mut u8) -> u32 {
     // Runs outside DllMain. Does the real work, then parks forever.
+    //
+    // The first line is the proof of injection. Without it, "did the DLL load?" had to be inferred from the
+    // hook firing, and a load that failed before the hook was installed left no trace at all - which is how a
+    // 404 from the lobby endpoint could be read as "the route is missing" when the agent was simply not there.
+    #[cfg(windows)]
+    {
+        let exe = std::env::current_exe()
+            .ok()
+            .and_then(|p| p.file_name().map(|n| n.to_string_lossy().to_string()))
+            .unwrap_or_else(|| "?".to_string());
+        log(&format!(
+            "agent loaded into {exe} (pid {}, log {})",
+            std::process::id(),
+            log_path().display()
+        ));
+    }
     start_presence();
     start_join_listener();
     start(&supervisor_address());
@@ -2142,12 +2198,16 @@ mod tests {
     /// This is the piece that lets the main menu host without spawning a process, so it has to work from a
     /// browser-like context: correct JSON, CORS headers, and an OPTIONS preflight answered. A missing CORS
     /// header would make the menu button silently do nothing, which is the failure this test exists for.
+    ///
+    /// The response is produced by the real [`route_endpoint`], not by a copy of three of its arms. The
+    /// previous version re-implemented the match, so it would have passed no matter what the real table said -
+    /// and the real table is what a 404 comes from.
     #[test]
     fn the_lobby_endpoint_answers_status_with_cors_headers() {
         use std::io::{Read, Write};
         use std::net::{TcpListener, TcpStream};
 
-        // Bind an ephemeral port and drive the same handler the thread uses.
+        // Bind an ephemeral port and drive the same router the thread uses.
         let listener = TcpListener::bind(("127.0.0.1", 0)).expect("bind");
         let addr = listener.local_addr().expect("addr");
 
@@ -2156,16 +2216,12 @@ mod tests {
             let mut buf = [0u8; 512];
             let n = stream.read(&mut buf).unwrap_or(0);
             let req = String::from_utf8_lossy(&buf[..n]).to_string();
+            let method = req.split_whitespace().next().unwrap_or("").to_string();
             let path = req.split_whitespace().nth(1).unwrap_or("").to_string();
 
-            let body = match path.as_str() {
-                "/coop/status" => lobby_status_body(),
-                "/coop/host" => lobby_host_body(),
-                "/coop/join" => lobby_join_body(),
-                _ => "{\"error\":\"no such endpoint\"}".to_string(),
-            };
+            let (code, body) = route_endpoint(&method, &path);
             let resp = format!(
-                "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\
+                "HTTP/1.1 {code}\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\
                  Access-Control-Allow-Origin: *\r\nConnection: close\r\n\r\n{body}",
                 body.len()
             );
@@ -2179,6 +2235,7 @@ mod tests {
         s.read_to_string(&mut out).expect("read");
         server.join().expect("server");
 
+        assert!(out.starts_with("HTTP/1.1 200"), "status must be 200, got:\n{out}");
         assert!(out.contains("Access-Control-Allow-Origin: *"), "CORS header is required:\n{out}");
         assert!(out.contains("\"injected\":true"));
         assert!(out.contains("\"hook_installed\":"));
@@ -2186,6 +2243,59 @@ mod tests {
         // Valid JSON, not just plausible text.
         let body = out.split("\r\n\r\n").nth(1).expect("body");
         assert!(body.starts_with('{') && body.ends_with('}'), "body must be a JSON object: {body}");
+    }
+
+    /// Every endpoint the front-end calls must exist in the agent's table.
+    ///
+    /// This is the test that was missing when a request came back **404**. The suite had a "lobby endpoint"
+    /// test, but it drove its own private `match` and so proved nothing about the real routing table: the
+    /// agent could have been missing every route and that test would still have passed.
+    ///
+    /// The list is the literal set of `agent("path", "method")` calls in `lobby.js` (the front-end's own
+    /// transport), including the query-string forms, because a path with `?team=4` is a different string from
+    /// the table's entry and only a prefix rule can match it.
+    #[test]
+    fn every_endpoint_the_front_end_calls_is_routed() {
+        // (method, path as the front-end sends it)
+        let calls = [
+            ("GET", "/coop/status"),
+            // The compatibility probe the co-op screen runs before anything else.
+            ("GET", "/coop/version"),
+            ("POST", "/coop/host"),
+            ("POST", "/coop/join"),
+            ("GET", "/coop/teams"),
+            ("POST", "/coop/claim?team=4&role=host"),
+            ("GET", "/coop/release?role=host"),
+            ("GET", "/coop/relay"),
+            ("GET", "/coop/lobby"),
+            ("POST", "/coop/lobby/set?state=waiting"),
+            ("POST", "/coop/lobby/set?state=idle"),
+            ("POST", "/coop/lobby/join"),
+            ("POST", "/coop/lobby/invite"),
+            ("GET", "/coop/connectlobby"),
+            ("GET", "/coop/clock"),
+            ("GET", "/coop/inbox"),
+        ];
+        for (method, path) in calls {
+            let (code, body) = route_endpoint(method, path);
+            assert_eq!(
+                code, "200 OK",
+                "{method} {path} is called by lobby.js but the agent answers {code}: {body}"
+            );
+            assert!(
+                body.starts_with('{') || body.starts_with('['),
+                "{method} {path} must answer JSON, got: {body}"
+            );
+        }
+    }
+
+    /// An unknown path must say what was asked for, so a mismatch is diagnosable from the response alone.
+    #[test]
+    fn an_unknown_endpoint_reports_the_method_and_path() {
+        let (code, body) = route_endpoint("POST", "/coop/nope?x=1");
+        assert_eq!(code, "404 Not Found");
+        assert!(body.contains("\"path\":\"/coop/nope?x=1\""), "the path must be echoed: {body}");
+        assert!(body.contains("\"method\":\"POST\""), "the method must be echoed: {body}");
     }
 
     /// Every endpoint must produce a JSON object. A malformed body would make the menu fail silently.

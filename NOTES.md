@@ -1,4 +1,4 @@
-﻿# F1 Manager 2024 — Co-op Anything notes
+# F1 Manager 2024 — Co-op Anything notes
 
 ## Game identity (recorded 2026-10-26)
 - Install: `E:\Steam\steamapps\common\F1 Manager 2024`
@@ -32,7 +32,7 @@ Active F1M24 modding scene: DatabaseEditor (save editor, v3.6.2), F1Manager2024L
 Test install copied to `local/f1-manager-2024/test-install` (isolated from owner's install).
 - UE4SS v3.0.1 already installed with 10 mods including SplitScreenMod and ConsoleEnablerMod
 - Engine: UE 5.1 (from UE4SS-settings.ini EngineVersionOverride)
-- Save location: `%LOCALAPPDATA%\F1Manager24\Saved\` (SaveGames, SaveGames2, SaveGames4, SaveGamesS)
+- Save location: `%USERPROFILE%\AppData\Local\F1Manager24\Saved\` (SaveGames, SaveGames2, SaveGames4, SaveGamesS)
 - Instance-local config created in test-install\F1Manager24\Saved\Config\Windows\ (Engine.ini, GameUserSettings.ini, Input.ini) — windowed 1280x720, VSync off
 - No anti-cheat detected
 
@@ -3264,3 +3264,51 @@ with 4 days CPU uptime, and `remote.py ping` works. `remote.py` and `preflight.p
 addresses instead of trusting one. **A failed name lookup is not evidence a machine is off.** When the client
 was first reached it had a stale agent (428,544 vs 508,928) and no pak in `~mods` at all beyond an old one, so
 it had been running with no current multiplayer tile - which is the other half of "the old bugs are still here".
+
+### 2026-10-30 - "Host 404, so DLL not working properly"
+
+Reported symptom, accurately: opening the co-op screen and pressing Host produced a bare `HTTP 404` in the
+status line. That message is the mod's own transport reporting `!r.ok` (`lobby.js`, `agent()`), so it is *our*
+404, not the game's - and it is unactionable, which is the actual defect.
+
+**What a 404 here can mean, and how they were separated:**
+
+1. *Nothing is listening.* Then the request never gets a status at all: `fetch`/XHR fails and the message is
+   "no connection to the co-op agent", not 404. Ruled out by the message itself.
+2. *The agent is old and has no such route.* The pak and the DLL deploy separately (`deploy_pak.py` and
+   `deploy-link`), so they drift. This is the plausible cause, and the one that matters.
+3. *The path differs from the table's entry.* `/coop/claim?team=4&role=host` is a different string from
+   `/coop/claim`, and only a prefix rule matches it.
+
+**Two real defects found while checking, both fixed:**
+
+- **The test that was supposed to cover routing proved nothing.** `the_lobby_endpoint_answers_status_with_cors_headers`
+  re-implemented three arms of the match inside its own `server` closure and asserted against *its own copy*.
+  The real table could have been missing every route and that test would still have passed. The table is now a
+  function, `route_endpoint(method, path)`, which the listener and the test both call;
+  `every_endpoint_the_front_end_calls_is_routed` drives all 16 paths `lobby.js` and `bridge.js` actually use,
+  including the query-string forms. Removing one route fails it with the exact path - verified by planting that.
+- **A 404 said nothing about what was asked for.** It now echoes `{"method","path"}`, so a mismatch is
+  diagnosable from the response instead of by reading source.
+
+**Added so this class of bug cannot be silent again:**
+
+- `GET /coop/version`, the one route every build has, returning `{"build","proto"}` from a shared
+  `build_id()`. The co-op screen probes it on mount (`checkAgentBuild`), *before* its status request, and a 404
+  there is reported as **"the co-op agent in this game is older than this UI mod ... restart the game after
+  deploying the current coop_agent.dll"** rather than as a mystery.
+- `agent loaded into <exe> (pid N, log <path>)` as the first line the agent logs. Before this, "did the DLL
+  load at all?" had to be inferred from the hook firing; a load that failed before the hook was installed left
+  no trace.
+- `tools/agent_routes.py`: probes every front-end path against the live game and distinguishes the three cases
+  above in its output, so the next 404 is answered in one command.
+
+**One thing that is *not* evidence either way.** `/coop/version` does not appear as a contiguous string in the
+built DLL - it is `/coop/ve` followed by immediates for the rest, the same integer-immediate encoding noted
+above for `+connect_lobby`. A byte scan cannot prove a route is present or absent, which is exactly why the
+routing evidence is a test that calls the real function rather than a grep.
+
+**State:** agent rebuilt (511,488 bytes, `3fb0c560`) and deployed to both machines with the matching pak
+(141,100 bytes). 124 agent tests pass, including the 16-path route coverage. **Not yet in a running game** -
+that requires the owner to launch it, and the DLL cannot be swapped under a running process, so a game started
+before this deploy will keep the old routes and keep 404ing.
