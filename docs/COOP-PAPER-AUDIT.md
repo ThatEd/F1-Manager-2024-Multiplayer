@@ -525,6 +525,32 @@ still treated as "need more" so normal traffic is unaffected.
 
 ---
 
+## 17. A test deadline that failed for reasons unrelated to the test
+
+While running the full suite after a Rust build, `unit` failed once with `live suite -- timed out waiting for
+server up`. Re-run alone, it passed; re-run after the build it passed again. The cause was a **fixed 12-second**
+deadline for a cold Python server start (`tools/headless/run_tests.js:137`), which the preceding workspace build
+had starved of CPU.
+
+Not a product bug, and the honest temptation is to call it flakiness and move on. But a suite with a fixed cost
+and a load-sensitive deadline is a suite that will fail for reasons unrelated to what it tests - and the failure
+mode is corrosive: it teaches the person running it that a red result may be noise, which is exactly the
+disposition that lets a real regression through. It had already cost one full 10-minute suite run here.
+
+Fixed in two ways, both of which matter:
+
+* The budget is now 60 s, overridable with `COOP_TEST_STARTUP_MS` for a slower machine, and the wait **stops
+  early if the server process exits** instead of sleeping out the full budget on something already dead.
+* A timeout now prints what the server said. "timed out" alone cannot distinguish *slow* from *crashed with a
+  traceback* from *port already in use* - and the diagnostic was being collected and thrown away. Verified by
+  forcing the budget to 1 ms: it reports `server output was: (nothing)` and fails cleanly, so the plumbing
+  works and a real traceback will now be visible.
+
+This is the same class of finding as §12 and §16: the information needed to explain the failure existed and was
+discarded one layer before anyone could see it.
+
+---
+
 ## Summary of what this audit changed
 
 | finding | severity | state |
@@ -537,6 +563,9 @@ still treated as "need more" so normal traffic is unaffected.
 | **`write_car` trusted its car id**: unchecked `car_start(id)` could target ~1 MB past the car table | low (no live path - `write_cars` filters) but the failure is corrupting unrelated game memory | **fixed**: bounds refused at the chokepoint, before address and before auth |
 | **`Raw LoadGame` bypassed the page guard**: `allowedFor` matched the command word, and `Raw` resolves an arbitrary event name after that check | **high** - the documented black-screen was one `Raw` away on any in-game page | **fixed**: a second guard on the resolved event name, ahead of both the trigger and the press path; 22 assertions |
 | **`Advance <n>` fired n+1 `AdvanceToNextEvent`**, and one of them at delay 0 | **high** - an extra advance moves the career, so a shared session silently skips a race weekend for both players | **fixed**: loop sends `times - 1`, tail sends the last; two assertions, both reverted to prove they fail |
+| **a declared frame length was trusted without limit** | medium - memory exhaustion reachable from the other machine (`coop-link` had no buffer cap) | **fixed**: `MAX_FRAME` refuses it as an error, so callers resync instead of accumulating |
+| **the resync path never resynced**: `split_frame` returned an empty frame that `drain(..0)` removed nothing of | medium - a corrupt header poisoned the stream forever; with the length cap it would have become a hot loop | **fixed**: `split_frame` returns `Result`, the reader clears and reports the drop |
+| a live-server test had a fixed 12 s deadline that starved under load | low - but a red result that may be noise trains people to ignore red | **fixed**: 60 s, overridable, fails fast if the server exits, and prints its output |
 | `Mailbox::drain` indexed the shared buffer directly on the game thread | low (unreachable today) but the failure mode is the whole process | **fixed**: `get(..)` with a zero-entry fallback |
 | save "opaque / unreadable" was imprecise: container is Unreal's, payload is compressed | low | corrected in this document and in `tools/save_format.py` |
 | `SIMULATE_RVA` still points at the right function in the installed exe | - | **verified statically**: file bytes at the RVA match the live-read prologue exactly (`tools/verify_offsets.py`) |

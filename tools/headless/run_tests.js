@@ -122,7 +122,13 @@ function startServer(port) {
   p.stdout.setEncoding('utf8');
   p.stderr.setEncoding('utf8');
   p.on('error', (e) => console.log('  server spawn error:', e.message));
-  return { proc: p, wrapper };
+  // Keep the last of what the server said. Without it, a failed start is indistinguishable from a slow
+  // one: both just say "timed out", and the reason (a Python error, a busy port) is thrown away.
+  const said = [];
+  const keep = (s) => { said.push(s); if (said.length > 40) said.shift(); };
+  p.stdout.on('data', keep);
+  p.stderr.on('data', keep);
+  return { proc: p, wrapper, said };
 }
 
 async function testLive() {
@@ -132,9 +138,23 @@ async function testLive() {
     return;
   }
 
-  const { proc, wrapper } = startServer(PORT);
+  const { proc, wrapper, said } = startServer(PORT);
   try {
-    await waitFor(async () => (await get('/status')).status === 200, 12000, 'server up');
+    // 12s was not enough when the rest of the runner had just built the Rust workspace; the server is a
+    // cold Python start, and this suite then failed for a reason unrelated to what it tests. A stable-cost
+    // suite should not have a load-sensitive deadline, so poll until the process dies or the budget (which
+    // can be raised on a slow machine) runs out - and report what the server actually said, because
+    // "timed out" alone cannot distinguish "slow" from "crashed with a traceback".
+    const budget = Number(process.env.COOP_TEST_STARTUP_MS || 60000);
+    try {
+      await waitFor(async () => {
+        if (proc.exitCode !== null) throw new Error('server exited with ' + proc.exitCode);
+        return (await get('/status')).status === 200;
+      }, budget, 'server up');
+    } catch (e) {
+      console.log('  server output was:\n    ' + (said.join('').trim().split('\n').join('\n    ') || '(nothing)'));
+      throw e;
+    }
     ok(true, 'server started and answers /status');
 
     // A client in none-mode at Frontend: Continue must be accepted.
