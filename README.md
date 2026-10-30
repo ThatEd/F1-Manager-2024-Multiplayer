@@ -17,7 +17,7 @@ launched with this code. Everything below reflects what has been *run*, not what
 |---|---|---|
 | UI command surface | **Mapped.** 352 events across 517 call sites; `engine.trigger` proven to be the single choke point | [docs/UI-COMMANDS.md](docs/UI-COMMANDS.md) |
 | Driving the UI from outside | **Works.** Pressing real controls emits the real events; `Continue` and `Load` proven live in-game on the host machine | [docs/CLIENT-UI-PRESS.md](docs/CLIENT-UI-PRESS.md) |
-| Starting a race session | **Not solved, but the lever is identified.** The *UI layer* has no event that starts a sim — the pre-session confirm emits only `PreSessionClosed`. The exe, though, contains session-flow commands the UI never sends: **`StageProceed`** (`0x5fa7c98`, inside the `SessionOverviewClosed`/`AdvanceToNextStage`/`PreSessionClosed` block) and `TravelToRaceWeekend` (`0x5fcac28`). Untried | [docs/UI-COMMANDS.md](docs/UI-COMMANDS.md) |
+| Starting a race session | **Not solved, but the lever is verified.** The *UI layer* has no event that starts a sim — the pre-session confirm emits only `PreSessionClosed`. The exe's native event-name table contains two names the UI never sends: **`StageProceed`** (`0x5fa7c98`) and `TravelToRaceWeekend` (`0x5fcac28`). Confirmed against the exe: the five names beside them that the UI *does* send appear 1–7 times in the Gameface JS, while these two appear **zero** times. Untried | [docs/COOP-PAPER-AUDIT.md](docs/COOP-PAPER-AUDIT.md) |
 | Car state replication | **Code complete, unrun.** Protocol, layout, mailbox and hook all tested; the hook has never fired in a live race | [docs/RACESIM-HIJACK.md](docs/RACESIM-HIJACK.md) |
 | Shared clock (both players pause together) | **Code complete, unrun.** Union rule unit-tested; the far side calls `SimPauseChange` on receipt. Never seen in a game | [docs/COORDINATION.md](docs/COORDINATION.md) |
 | One contract per person per day | **Code complete, unrun.** Arbitration tested in the supervisor, never exercised by two live clients | [docs/COORDINATION.md](docs/COORDINATION.md) |
@@ -26,6 +26,7 @@ launched with this code. Everything below reflects what has been *run*, not what
 | Steam "Join Game" | **Code complete, unrun.** Lobby create/join/`+connect_lobby` implemented; three bugs that made it impossible are fixed (callback id `3334` -> `333`, lobby id never adopted, invite path refused a real invite). Needs a live Steam client | [docs/STEAM-JOIN.md](docs/STEAM-JOIN.md) |
 | Team picker (one team each) | **Fixed and unit-tested.** A host could take all ten teams and lock the other player out: object keys are strings, `myTeam` is a number, so no claim was ever released. Claims also now cross the relay instead of staying in one process | `tools/headless/team_claim_test.js`, `python -I run_all_tests.py teams e2e` |
 | Rich presence | **Code complete, unrun.** `status` key path avoids the publisher-token problem of `steam_display` | [docs/RICH-PRESENCE.md](docs/RICH-PRESENCE.md) |
+| Save transfer host→client | **Code complete, unrun.** Chunked and hash-checked before the write; now also targets the *live* `SaveGames` folder rather than a hardcoded one, because the game keeps one per profile | [docs/COOP-PAPER-AUDIT.md](docs/COOP-PAPER-AUDIT.md) |
 
 **What "unrun" means here:** unit tests pass, the code compiles, and the design is written down — but
 the game has not executed it. Do not read "code complete" as "works".
@@ -33,6 +34,19 @@ the game has not executed it. Do not read "code complete" as "works".
 **What has genuinely been proven in a running game** (on one machine, before this bundle):
 `ContinueGame` from the main menu loads a career, and `LoadGame <slot>` loads a chosen save, both by
 pressing the real on-screen controls. That is it. Everything else is one launch away from being known.
+
+**What has been settled by reading the game's files instead of running it** — all of
+[docs/COOP-PAPER-AUDIT.md](docs/COOP-PAPER-AUDIT.md), which is now the most current document in this
+bundle. Findings that changed the code:
+
+| Found on paper | Consequence |
+|---|---|
+| `Raw LoadGame` bypassed the page guard that exists to prevent a black screen | fixed; 22 assertions |
+| `Advance <n>` fired n+1 events — on the calendar an extra advance *moves the career*, skipping a race weekend for both players | fixed |
+| A declared frame length was unbounded, and the "resync" path removed nothing | fixed: cap + real resync |
+| `coop-link` wrote received saves to a hardcoded `SaveGames`, while the game keeps one folder per profile | fixed: picks the live one |
+| Team retarget's "edit then reload" cannot work — `LoadGame` re-reads from disk and nothing writes a `.sav` | open; the first thing to test |
+| `SIMULATE_RVA` still points at the right function in this build | verified from the exe, no launch needed |
 
 ## Quick start
 
@@ -46,11 +60,16 @@ python -I run_all_tests.py teams    # one player cannot take every team
 python -I run_all_tests.py redaction   # no private identifiers in the tree
 ```
 
-Currently: **237 Rust tests**, plus 11 JavaScript suites (unit, press, observe, lobby, inert, drive,
-render, pak, teams, e2e) and the redaction check that fails if a private path has leaked into the tree.
+Currently: **249 Rust tests**, plus 19 suites (`rust`, `auth`, `unit`, `press`, `observe`, `steam`,
+`inert`, `drive`, `render`, `boot`, `pak`, `proxy`, `offsets`, `gaps`, `teams`, `clock`, `guard`, `e2e`,
+`redaction`) and the redaction check that fails if a private path has leaked into the tree.
 All of it passes from a clean clone. The runner prints each suite's own assertion count rather than one
 grand total, because two suites report `N/M passed` and two report `N passed`, and summing them across
 both spellings double-counts.
+
+`offsets` and `gaps` read the installed `F1Manager24.exe`, so they answer questions that used to need the
+game running: whether `SIMULATE_RVA` still points at the same function, and whether the engine-only
+session-flow event names are still present. Both skip cleanly when the game is not installed.
 
 Verified by cloning the published repo into an empty directory and running it there: `ALL OK (3 skipped:
 press, drive, render)`. Three suites render real components from the game's decompiled UI, so without the
