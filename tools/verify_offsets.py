@@ -135,6 +135,39 @@ def main():
     print("  field offsets (off::LAT, off::TYRE_SURFACE0, ...): these index a runtime object built by the")
     print("      sim, not the executable. No file can confirm them; only a live read can.")
 
+    # ---- identity: the numbers UI-COMMANDS.md records so a write-up is anchored to a build ----------------
+    # These are cheap to check and were wrong once: the PE timestamp was documented as 0x67AF44F7 when the
+    # file says 0x67AE45F7 (a transposition), which is the kind of error that makes a write-up look verified
+    # when it is not. Checking them here means the doc either matches the binary or the suite says so.
+    print()
+    print("Build identity (what UI-COMMANDS.md records):")
+    import struct
+    with open(exe, "rb") as fh:
+        head = fh.read(0x200)
+    e_lfanew = struct.unpack_from("<I", head, 0x3C)[0]
+    stamp = struct.unpack_from("<I", head, e_lfanew + 8)[0]
+    size = os.path.getsize(exe)
+    print("  size           : %d bytes" % size)
+    print("  PE timestamp   : 0x%08X" % stamp)
+
+    doc = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "UI-COMMANDS.md")
+    if os.path.exists(doc):
+        text = open(doc, encoding="utf-8", errors="ignore").read()
+        m = re.search(r"PE timestamp\s*\|\s*`0x([0-9A-Fa-f]+)`", text)
+        if m:
+            claimed = int(m.group(1), 16)
+            if claimed == stamp:
+                print("  documented     : matches UI-COMMANDS.md")
+            else:
+                print("  MISMATCH: UI-COMMANDS.md says 0x%08X, the file says 0x%08X" % (claimed, stamp))
+                failures.append("documented PE timestamp")
+        m = re.search(r"\|\s*size\s*\|\s*([\d,]+) bytes", text)
+        if m:
+            claimed_size = int(m.group(1).replace(",", ""))
+            if claimed_size != size:
+                print("  MISMATCH: UI-COMMANDS.md says %d bytes, the file is %d" % (claimed_size, size))
+                failures.append("documented size")
+
     print()
     print("Structural invariants that ARE checkable from layout.rs alone:")
     car_base = c.get("CAR_BASE")

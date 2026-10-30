@@ -22,7 +22,7 @@ E:\Steam\steamapps\common\F1 Manager 2024\F1Manager24\Binaries\Win64\
 | file version | `1.11.0.39891` |
 | SHA-256 | `7ffe404f37a813c326cd0635001e388715e84fe945093dc802e388897b2050f6` |
 | size | 553,445,376 bytes |
-| PE timestamp | `0x67AF44F7` |
+| PE timestamp | `0x67AE45F7` (2025-02-13 19:20:23 UTC) |
 | machine / format | x64, PE32+, 19 sections |
 | CompanyName | Frontier Developments plc. |
 
@@ -46,26 +46,26 @@ Neither proves what a handler *does* — §3.5 and §5 keep that distinction exp
 
 A mouse click or gamepad/keyboard `Select` reaches `ButtonBehaviourT.performSelect`:
 
-- ``js/common/components/ButtonBehaviourT.js:70`` — `performSelect()` definition.
+- [`js/common/components/ButtonBehaviourT.js:70`](E:/FModel/Output/Exports/F1Manager24/Content/UIGameface/js/common/components/ButtonBehaviourT.js#L70) — `performSelect()` definition.
 - Entry points, all funnelling into it:
-  - ``ButtonBehaviourT.js:66`` — keyboard/gamepad `handleInput` → `return this.performSelect();`
-  - ``ButtonBehaviourT.js:123`` — mouse `onClick`
-  - ``ButtonBehaviourT.js:138`` — mouse `onMouseDown` when `selectOnPress` is set
+  - [`ButtonBehaviourT.js:66`](E:/FModel/Output/Exports/F1Manager24/Content/UIGameface/js/common/components/ButtonBehaviourT.js#L66) — keyboard/gamepad `handleInput` → `return this.performSelect();`
+  - [`ButtonBehaviourT.js:123`](E:/FModel/Output/Exports/F1Manager24/Content/UIGameface/js/common/components/ButtonBehaviourT.js#L123) — mouse `onClick`
+  - [`ButtonBehaviourT.js:138`](E:/FModel/Output/Exports/F1Manager24/Content/UIGameface/js/common/components/ButtonBehaviourT.js#L138) — mouse `onMouseDown` when `selectOnPress` is set
 
 Inside `performSelect`, the `onSelect` prop is invoked through a thin wrapper:
 
-- ``ButtonBehaviourT.js:86`` — `else if (onSelect) {`
-- ``ButtonBehaviourT.js:95`` — `this.onSelect();`
-- ``ButtonBehaviourT.js:102-103`` — `onSelect() { this.props.onSelect?.(this.props.userData); }`
+- [`ButtonBehaviourT.js:86`](E:/FModel/Output/Exports/F1Manager24/Content/UIGameface/js/common/components/ButtonBehaviourT.js#L86) — `else if (onSelect) {`
+- [`ButtonBehaviourT.js:95`](E:/FModel/Output/Exports/F1Manager24/Content/UIGameface/js/common/components/ButtonBehaviourT.js#L95) — `this.onSelect();`
+- [`ButtonBehaviourT.js:102-103`](E:/FModel/Output/Exports/F1Manager24/Content/UIGameface/js/common/components/ButtonBehaviourT.js#L102) — `onSelect() { this.props.onSelect?.(this.props.userData); }`
 
 Every concrete button class used by the game derives from `ButtonBehaviourT`:
 
-- ``js/project/components/ContinueButton.js:7`` — `class _ContinueButton extends ButtonBehaviourT.Component`
-- ``js/project/components/SimpleButton.js:12`` — `class _SimpleButton extends ButtonBehaviourT.Component`
+- [`js/project/components/ContinueButton.js:7`](E:/FModel/Output/Exports/F1Manager24/Content/UIGameface/js/project/components/ContinueButton.js#L7) — `class _ContinueButton extends ButtonBehaviourT.Component`
+- [`js/project/components/SimpleButton.js:12`](E:/FModel/Output/Exports/F1Manager24/Content/UIGameface/js/project/components/SimpleButton.js#L12) — `class _SimpleButton extends ButtonBehaviourT.Component`
 
 The `onSelect` handler supplied by the screen then calls the event helper:
 
-- ``js/common/core/Engine.js:54-56``:
+- [`js/common/core/Engine.js:54-56`](E:/FModel/Output/Exports/F1Manager24/Content/UIGameface/js/common/core/Engine.js#L54):
 
 ```js
 function sendEvent(eventName, ...args) {
@@ -96,25 +96,25 @@ defines it; it comes from `js/common/lib/cohtml.js` (Coherent's runtime shim).
 
 | line | content |
 |---|---|
-| ``Engine.js:51`` | `engine.trigger(name, ...args);` — body of `triggerListener(name, ...args)` (`Engine.js:50`) |
-| ``Engine.js:56`` | `engine.trigger(eventName, ...args);` — body of `sendEvent` |
+| [`Engine.js:51`](E:/FModel/Output/Exports/F1Manager24/Content/UIGameface/js/common/core/Engine.js#L51) | `engine.trigger(name, ...args);` — body of `triggerListener(name, ...args)` (`Engine.js:50`) |
+| [`Engine.js:56`](E:/FModel/Output/Exports/F1Manager24/Content/UIGameface/js/common/core/Engine.js#L56) | `engine.trigger(eventName, ...args);` — body of `sendEvent` |
 
 A full scan of the export finds **exactly 5** `engine.trigger(` call sites, and all 5 are in files
 under `common/`:
 
 | file:line | context | notes |
 |---|---|---|
-| ``common/core/Engine.js:51`` | `triggerListener` | sibling of `sendEvent`, same destination |
-| ``common/core/Engine.js:56`` | `sendEvent` | the main path |
-| ``common/lib/cohtml.js:249`` | Coherent runtime internals | `engine.trigger('Error', message)` |
-| ``common/lib/cohtml.js:267`` | Coherent runtime internals | `engine.trigger('Ready')` |
-| ``common/lib/cohtml.js:273`` | Coherent runtime internals | `engine.trigger('Ready')` |
+| [`common/core/Engine.js:51`](E:/FModel/Output/Exports/F1Manager24/Content/UIGameface/js/common/core/Engine.js#L51) | `triggerListener` | sibling of `sendEvent`, same destination |
+| [`common/core/Engine.js:56`](E:/FModel/Output/Exports/F1Manager24/Content/UIGameface/js/common/core/Engine.js#L56) | `sendEvent` | the main path |
+| [`common/lib/cohtml.js:249`](E:/FModel/Output/Exports/F1Manager24/Content/UIGameface/js/common/lib/cohtml.js#L249) | Coherent runtime internals | `engine.trigger('Error', message)` |
+| [`common/lib/cohtml.js:267`](E:/FModel/Output/Exports/F1Manager24/Content/UIGameface/js/common/lib/cohtml.js#L267) | Coherent runtime internals | `engine.trigger('Ready')` |
+| [`common/lib/cohtml.js:273`](E:/FModel/Output/Exports/F1Manager24/Content/UIGameface/js/common/lib/cohtml.js#L273) | Coherent runtime internals | `engine.trigger('Ready')` |
 
 **Consequence for the bridge.** Wrapping `engine.trigger` intercepts *every* UI→engine event,
 including `triggerListener` calls (which is how all audio events travel) and Coherent's own
 `Ready`/`Error`. A wrapper therefore needs no knowledge of `sendEvent` at all. It also cannot see
 game→UI traffic: that arrives via `engine.on(...)`, i.e. `Engine.addListener` at
-``Engine.js:42-43``.
+[`Engine.js:42-43`](E:/FModel/Output/Exports/F1Manager24/Content/UIGameface/js/common/core/Engine.js#L42).
 
 ### 1.3 Places that bypass `engine.trigger`
 
@@ -122,7 +122,7 @@ Three distinct bypass surfaces exist. None of them is an event.
 
 **(a) `engine.call` — function call, not an event.** Two sites only.
 
-- ``Engine.js:59-64``:
+- [`Engine.js:59-64`](E:/FModel/Output/Exports/F1Manager24/Content/UIGameface/js/common/core/Engine.js#L59):
 
 ```js
 function callBoundFunction(functionName, ...args) {
@@ -133,24 +133,24 @@ function callBoundFunction(functionName, ...args) {
 }
 ```
 
-- ``Engine.js:61`` — `return engine.call(functionName, ...args);`
-- ``common/core/Player.js:17`` — the other raw `engine.call`, `engine.call('GetGameOwner')`
+- [`Engine.js:61`](E:/FModel/Output/Exports/F1Manager24/Content/UIGameface/js/common/core/Engine.js#L61) — `return engine.call(functionName, ...args);`
+- [`common/core/Player.js:17`](E:/FModel/Output/Exports/F1Manager24/Content/UIGameface/js/common/core/Player.js#L17) — the other raw `engine.call`, `engine.call('GetGameOwner')`
 
 `callBoundFunction` is the *only* route from JS into a native function by name, and it is used for
 infrastructure, not gameplay. All 20 call sites:
 
 `GetCompositeImageIDForBlurredBackground`, `RegisterCompositeRect`, `DeregisterCompositeRect`,
 `UpdateCompositeRectSortOrder`, `UpdateCompositeRectColour`, `UpdateCompositeRectCoords`
-(``BlurredBackground.js:28-78``),
-`GetDataStore` (``DataStore.js:231``),
-`LaunchOSK` (``Input.js:36``),
+([`BlurredBackground.js:28-78`](E:/FModel/Output/Exports/F1Manager24/Content/UIGameface/js/common/components/BlurredBackground.js#L28)),
+`GetDataStore` ([`DataStore.js:231`](E:/FModel/Output/Exports/F1Manager24/Content/UIGameface/js/common/core/DataStore.js#L231)),
+`LaunchOSK` ([`Input.js:36`](E:/FModel/Output/Exports/F1Manager24/Content/UIGameface/js/common/core/Input.js#L36)),
 `CreateGlobalControlContext` / `CreatePlayerControlContext` / `DestroyControlContext`
-(``Input.js:243-313``),
-`GetLocalisation` (``Localisation.js:75``),
-`SetGameOwnerChangedCallback` (``Player.js:25``),
-`GetProfiler` (``Profile.js:129``),
-`GetSystemInformation` (``System.js:161``),
-`IsRunningInEngine` (``Engine.js:123``).
+([`Input.js:243-313`](E:/FModel/Output/Exports/F1Manager24/Content/UIGameface/js/common/core/Input.js#L243)),
+`GetLocalisation` ([`Localisation.js:75`](E:/FModel/Output/Exports/F1Manager24/Content/UIGameface/js/common/core/Localisation.js#L75)),
+`SetGameOwnerChangedCallback` ([`Player.js:25`](E:/FModel/Output/Exports/F1Manager24/Content/UIGameface/js/common/core/Player.js#L25)),
+`GetProfiler` ([`Profile.js:129`](E:/FModel/Output/Exports/F1Manager24/Content/UIGameface/js/common/core/Profile.js#L129)),
+`GetSystemInformation` ([`System.js:161`](E:/FModel/Output/Exports/F1Manager24/Content/UIGameface/js/common/core/System.js#L161)),
+`IsRunningInEngine` ([`Engine.js:123`](E:/FModel/Output/Exports/F1Manager24/Content/UIGameface/js/common/core/Engine.js#L123)).
 
 **Notably there is no `callBoundFunction` anywhere in `project/modules/raceWeekend/`.**
 No session start, no advance, no simulation runs through it.
@@ -159,7 +159,7 @@ No session start, no advance, no simulation runs through it.
 These write the same DataStore the native game reads/writes, so a write can change game-visible
 state without any event.
 
-- Definition: ``DataStore.js:166-169``
+- Definition: [`DataStore.js:166-169`](E:/FModel/Output/Exports/F1Manager24/Content/UIGameface/js/common/core/DataStore.js#L166)
 
 ```js
 function setValue(context, propertyName, value) {
@@ -168,7 +168,7 @@ function setValue(context, propertyName, value) {
 }
 ```
 
-- The assert (``Assert.js:40-45``) is `if (Engine.isCoherentPlayer()) return true; ... throw 'Assertion failure. Is not running in Coherent Player'` (`:44`).
+- The assert ([`Assert.js:40-45`](E:/FModel/Output/Exports/F1Manager24/Content/UIGameface/js/common/core/Assert.js#L40)) is `if (Engine.isCoherentPlayer()) return true; ... throw 'Assertion failure. Is not running in Coherent Player'` (`:44`).
 - **Therefore in the shipped game (where `isCoherentPlayer()` is false, §1.4) *every*
   `DS.setValue` throws `Assertion failure. Is not running in Coherent Player`.** Every
   `if (Engine.isCoherentPlayer()) { DS.setValue(...) }` block is a **preview-harness-only** path,
@@ -179,25 +179,25 @@ rare. Non-debug, non-`isCoherentPlayer`-guarded writes found:
 
 | file:line | write |
 |---|---|
-| ``project/modules/scouting/compare/ComparisonUtil.js:93-96`` | `DS.setValue(viewHistoryContext..., 'staffID', ...)` — UI view history only |
-| ``project/modules/teamManagement/TeamManagementModule.js:237-255`` | debug keyboard shortcuts (`KeyQ`/`KeyW`/`KeyA`/`KeyS`) — inside `onKeyDown` |
-| ``project/modules/raceWeekend/RaceWeekendModule.js:85-103`` | debug keyboard shortcuts (`Shift+1..8`) setting `Weekend.currentStage` |
-| ``project/utils/AccentColorUtil.js:39`` | `UI.themeIndex` — cosmetic |
+| [`project/modules/scouting/compare/ComparisonUtil.js:93-96`](E:/FModel/Output/Exports/F1Manager24/Content/UIGameface/js/project/modules/scouting/compare/ComparisonUtil.js#L93) | `DS.setValue(viewHistoryContext..., 'staffID', ...)` — UI view history only |
+| [`project/modules/teamManagement/TeamManagementModule.js:237-255`](E:/FModel/Output/Exports/F1Manager24/Content/UIGameface/js/project/modules/teamManagement/TeamManagementModule.js#L237) | debug keyboard shortcuts (`KeyQ`/`KeyW`/`KeyA`/`KeyS`) — inside `onKeyDown` |
+| [`project/modules/raceWeekend/RaceWeekendModule.js:85-103`](E:/FModel/Output/Exports/F1Manager24/Content/UIGameface/js/project/modules/raceWeekend/RaceWeekendModule.js#L85) | debug keyboard shortcuts (`Shift+1..8`) setting `Weekend.currentStage` |
+| [`project/utils/AccentColorUtil.js:39`](E:/FModel/Output/Exports/F1Manager24/Content/UIGameface/js/project/utils/AccentColorUtil.js#L39) | `UI.themeIndex` — cosmetic |
 
 The `RaceWeekendModule` debug keys are the one genuinely interesting unguarded write: they mutate
 `['Weekend'].currentStage` directly. But they are bound behind
 `if (Engine.isCoherentPlayer()) addEventListener(...)` at
-``RaceWeekendModule.js:30-31``, so they are also dead in the shipped game.
+[`RaceWeekendModule.js:30-31`](E:/FModel/Output/Exports/F1Manager24/Content/UIGameface/js/project/modules/raceWeekend/RaceWeekendModule.js#L30), so they are also dead in the shipped game.
 
 **(c) `Engine.triggerListener` — same destination, different wrapper.** Used by the audio system
-only (``Audio.js:56``) and by the JS DataStore mock
-(``DataStoreJSImpl.js``). A wrapper on
+only ([`Audio.js:56`](E:/FModel/Output/Exports/F1Manager24/Content/UIGameface/js/common/core/Audio.js#L56)) and by the JS DataStore mock
+([`DataStoreJSImpl.js`](E:/FModel/Output/Exports/F1Manager24/Content/UIGameface/js/common/debug/DataStoreJSImpl.js)). A wrapper on
 `engine.trigger` catches these too.
 
 ### 1.4 A trap: `isCoherentPlayer()` is **not** "running in the game"
 
 The name is misleading and the polarity matters. In
-``Engine.js:121-133``:
+[`Engine.js:121-133`](E:/FModel/Output/Exports/F1Manager24/Content/UIGameface/js/common/core/Engine.js#L121):
 
 ```js
 engine.whenReady.then(() => {
@@ -212,7 +212,7 @@ engine.whenReady.then(() => {
 ```
 
 `getIsRunningInEngineFunctionName()` returns `'IsRunningInEngine'`
-(``SystemConfig.js:13-20``).
+([`SystemConfig.js:13-20`](E:/FModel/Output/Exports/F1Manager24/Content/UIGameface/js/config/SystemConfig.js#L13)).
 So:
 
 - `callBoundFunction('IsRunningInEngine')` **resolves** (running in the game) → `_isCoherentPlayer = false`.
@@ -220,9 +220,9 @@ So:
 
 Corroborating evidence that `true` means "preview harness":
 
-- ``DataStore.js:206-214`` swaps in the **JS mock** DataStore (`common/debug/DataStoreJSImpl`) when `isCoherentPlayer()` is true, and the real `CppImpl` otherwise.
-- ``RaceWeekendApp.js:37-40`` loads `DebugFlagsManager`, `DebugPitStopManager`, `DebugPreSessionManager` only when it is true.
-- ``RaceWeekendModule.js:58-59`` renders `DebugRaceWeekendViewManager` only when it is true.
+- [`DataStore.js:206-214`](E:/FModel/Output/Exports/F1Manager24/Content/UIGameface/js/common/core/DataStore.js#L206) swaps in the **JS mock** DataStore (`common/debug/DataStoreJSImpl`) when `isCoherentPlayer()` is true, and the real `CppImpl` otherwise.
+- [`RaceWeekendApp.js:37-40`](E:/FModel/Output/Exports/F1Manager24/Content/UIGameface/js/project/apps/RaceWeekendApp.js#L37) loads `DebugFlagsManager`, `DebugPitStopManager`, `DebugPreSessionManager` only when it is true.
+- [`RaceWeekendModule.js:58-59`](E:/FModel/Output/Exports/F1Manager24/Content/UIGameface/js/project/modules/raceWeekend/RaceWeekendModule.js#L58) renders `DebugRaceWeekendViewManager` only when it is true.
 
 **Reading rule for the rest of this document:** in the shipped game `isCoherentPlayer()` is
 `false`, so every `if (Engine.isCoherentPlayer()) {...}` block is dead code and every `else`
@@ -264,7 +264,7 @@ which is a different function with the same name. Final numbers:
 
 The 103-name list from the brief is a **subset**: 101 of those 103 are engine events
 (the other 2, `show_Toast` and `hide_Toast`, are `Audio.sendEvent` calls in
-``NotificationsService.js:28,38``).
+[`NotificationsService.js:28,38`](E:/FModel/Output/Exports/F1Manager24/Content/UIGameface/js/project/utils/NotificationsService.js#L28)).
 **252 engine events are missing from the 103-name list**, and they include exactly the
 race-weekend machinery this research was asked about: `AdvanceToNextStage`,
 `SessionOverviewClosed`, `PreSessionClosed`, `SubmitActiveSessionSetup`, `SimulateSingleSession`,
@@ -290,12 +290,12 @@ from the export:
 
 | file:line | construction | consequence |
 |---|---|---|
-| ``project/modules/options/OptionsScreenAdjustments.js:72`` | `'OptionsChange' + key[0].toUpperCase() + key.substring(1)` | the `OptionsChange*` family is partly open-ended |
-| ``project/modules/raceWeekend/DriverPanel.js:411`` | `'Commands' + DriverPanelMenu[index] + 'TabSelected'` | one family per driver-panel tab |
-| ``project/modules/fanfareModule/components/fanfares/*.js`` | `` `${EFanfareType[...]}AnimationFinished` `` and `` `...Continue` `` | one pair per `EFanfareType` value |
+| [`project/modules/options/OptionsScreenAdjustments.js:72`](E:/FModel/Output/Exports/F1Manager24/Content/UIGameface/js/project/modules/options/OptionsScreenAdjustments.js#L72) | `'OptionsChange' + key[0].toUpperCase() + key.substring(1)` | the `OptionsChange*` family is partly open-ended |
+| [`project/modules/raceWeekend/DriverPanel.js:411`](E:/FModel/Output/Exports/F1Manager24/Content/UIGameface/js/project/modules/raceWeekend/DriverPanel.js#L411) | `'Commands' + DriverPanelMenu[index] + 'TabSelected'` | one family per driver-panel tab |
+| [`project/modules/fanfareModule/components/fanfares/*.js`](E:/FModel/Output/Exports/F1Manager24/Content/UIGameface/js/project/modules/fanfareModule/components/fanfares/FanfareSponsorPlanReview.js#L43) | `` `${EFanfareType[...]}AnimationFinished` `` and `` `...Continue` `` | one pair per `EFanfareType` value |
 | `project/components/CASFooter.js:84,89` | `this.props.resetEvent` / `randomiseEvent` | caller-supplied |
 
-`EFanfareType` has 14 values (``GameTypes.js``, search `var EFanfareType`):
+`EFanfareType` has 14 values ([`GameTypes.js`](E:/FModel/Output/Exports/F1Manager24/Content/UIGameface/js/project/data/GameTypes.js), search `var EFanfareType`):
 `ManufacturingCompleted`, `DesignCompleted`, `ResearchCompleted`, `StaffHired`,
 `ConstructionCompleted`, `UpgradeCompleted`, `RefurbishCompleted`, `MidSeasonBoardReview`,
 `EndOfSeasonOverview`, `StaffRatingChanged`, `FastestPitStop`, `NewSeasonTarget`,
@@ -669,12 +669,12 @@ graph rooted at `Frontend.html` / `RaceWeekend.html` / `TeamManagement.html`.
 
 | event | all sites |
 |---|---|
-| `AdvanceToNextEvent` | ``ContinueButtonContainer.js:155`` (two-press confirm), ``ContinueButtonContainer.js:176`` (`TeamManagementContinue`), ``ContinueButtonContainer.js:192`` (`ToRaceWeekend`/`ToRace`), ``SponsorTargetsPreRaceDriver.js:188``, ``TimeProgressionPanel.js:152`` (the STOP button) |
-| `AdvanceToNextStage` | ``DriverPracticeGoals.js:60``, ``FinancesView.js:44``, ``PostPracticeConfidenceView.js:61``, ``PostPracticeSummaryView.js:81``, ``PostQualifyingSummaryView.js:135``, ``PostQualifyingSummaryView.js:139``, ``SessionResults.js:18`` |
-| `PreSessionClosed` | ``PresessionView.js:141`` (after penalty dialog OK), ``PresessionView.js:250`` (direct continue) |
-| `OnStageBackwards` | ``PresessionView.js:237``, ``SessionOptions.js:68``, ``PostRaceSummaryViewPitStops.js:265`` |
+| `AdvanceToNextEvent` | [`ContinueButtonContainer.js:155`](E:/FModel/Output/Exports/F1Manager24/Content/UIGameface/js/project/components/ContinueButtonContainer.js#L155) (two-press confirm), [`ContinueButtonContainer.js:176`](E:/FModel/Output/Exports/F1Manager24/Content/UIGameface/js/project/components/ContinueButtonContainer.js#L176) (`TeamManagementContinue`), [`ContinueButtonContainer.js:192`](E:/FModel/Output/Exports/F1Manager24/Content/UIGameface/js/project/components/ContinueButtonContainer.js#L192) (`ToRaceWeekend`/`ToRace`), [`SponsorTargetsPreRaceDriver.js:188`](E:/FModel/Output/Exports/F1Manager24/Content/UIGameface/js/project/modules/sponsorTargets/SponsorTargetsPreRaceDriver.js#L188), [`TimeProgressionPanel.js:152`](E:/FModel/Output/Exports/F1Manager24/Content/UIGameface/js/project/modules/teamManagement/TimeProgressionPanel.js#L152) (the STOP button) |
+| `AdvanceToNextStage` | [`DriverPracticeGoals.js:60`](E:/FModel/Output/Exports/F1Manager24/Content/UIGameface/js/project/modules/raceWeekend/DriverPracticeGoals.js#L60), [`FinancesView.js:44`](E:/FModel/Output/Exports/F1Manager24/Content/UIGameface/js/project/modules/raceWeekend/FinancesView.js#L44), [`PostPracticeConfidenceView.js:61`](E:/FModel/Output/Exports/F1Manager24/Content/UIGameface/js/project/modules/raceWeekend/PostPracticeConfidenceView.js#L61), [`PostPracticeSummaryView.js:81`](E:/FModel/Output/Exports/F1Manager24/Content/UIGameface/js/project/modules/raceWeekend/PostPracticeSummaryView.js#L81), [`PostQualifyingSummaryView.js:135`](E:/FModel/Output/Exports/F1Manager24/Content/UIGameface/js/project/modules/raceWeekend/PostQualifyingSummaryView.js#L135), [`PostQualifyingSummaryView.js:139`](E:/FModel/Output/Exports/F1Manager24/Content/UIGameface/js/project/modules/raceWeekend/PostQualifyingSummaryView.js#L139), [`SessionResults.js:18`](E:/FModel/Output/Exports/F1Manager24/Content/UIGameface/js/project/modules/raceWeekend/sessionResults/SessionResults.js#L18) |
+| `PreSessionClosed` | [`PresessionView.js:141`](E:/FModel/Output/Exports/F1Manager24/Content/UIGameface/js/project/modules/raceWeekend/PresessionView.js#L141) (after penalty dialog OK), [`PresessionView.js:250`](E:/FModel/Output/Exports/F1Manager24/Content/UIGameface/js/project/modules/raceWeekend/PresessionView.js#L250) (direct continue) |
+| `OnStageBackwards` | [`PresessionView.js:237`](E:/FModel/Output/Exports/F1Manager24/Content/UIGameface/js/project/modules/raceWeekend/PresessionView.js#L237), [`SessionOptions.js:68`](E:/FModel/Output/Exports/F1Manager24/Content/UIGameface/js/project/modules/raceWeekend/simulatingSessions/SessionOptions.js#L68), [`PostRaceSummaryViewPitStops.js:265`](E:/FModel/Output/Exports/F1Manager24/Content/UIGameface/js/project/modules/raceWeekend/PostRaceSummaryViewPitStops.js#L265) |
 | `SkipCinematics` | `project/modules/frontend/components/FrontendCinematicsView.js:58`, `project/modules/raceWeekend/IntroView.js:20`, `project/modules/raceWeekend/RaceHighlightsCinematicsView.js:133`, `project/modules/raceWeekend/RaceIntroCinematicsView.js:74`, `project/modules/raceWeekend/RaceOutroCinematicsView.js:74`, `project/modules/raceWeekend/RaceReactionsCinematicsView.js:74`, `project/modules/raceWeekend/SummaryView.js:19` |
-| `PostRaceSummaryClosed` | ``PostRaceSummaryView.js:146``, ``PostRaceSummaryView.js:150`` |
+| `PostRaceSummaryClosed` | [`PostRaceSummaryView.js:146`](E:/FModel/Output/Exports/F1Manager24/Content/UIGameface/js/project/modules/raceWeekend/PostRaceSummaryView.js#L146), [`PostRaceSummaryView.js:150`](E:/FModel/Output/Exports/F1Manager24/Content/UIGameface/js/project/modules/raceWeekend/PostRaceSummaryView.js#L150) |
 
 ---
 
@@ -686,7 +686,7 @@ does instead (proven) and what that implies for the bridge (inferred).
 
 ### 3.1 `ContinueGame` — loads `Save.Saves.continueSlotName`, and passes no argument
 
-**Raising site:** ``project/modules/frontend/components/MainMenu.js:147-149``
+**Raising site:** [`project/modules/frontend/components/MainMenu.js:147-149`](E:/FModel/Output/Exports/F1Manager24/Content/UIGameface/js/project/modules/frontend/components/MainMenu.js#L147)
 
 ```js
 onSelectContinue = () => {
@@ -695,7 +695,7 @@ onSelectContinue = () => {
 ```
 
 **`ContinueGame` takes no arguments.** It is the only raising site in the export. The Continue
-button is ``MainMenu.js:66``,
+button is [`MainMenu.js:66`](E:/FModel/Output/Exports/F1Manager24/Content/UIGameface/js/project/modules/frontend/components/MainMenu.js#L66),
 and the save context it *displays* is passed as a prop, not as an event argument:
 
 ```js
@@ -705,26 +705,26 @@ preact.h(FrontendContinueButton_1.FrontendContinueButton, { disabled: !areTracks
 
 **Where the slot name comes from.** `MainMenu` never sends it; it only *shows* it.
 
-- The DataStore property is declared in ``project/data/Saves.js:59``:
+- The DataStore property is declared in [`project/data/Saves.js:59`](E:/FModel/Output/Exports/F1Manager24/Content/UIGameface/js/project/data/Saves.js#L59):
 
 ```js
 preact.h(DataStoreSchema_1.Prop, { id: 'continueSlotName', string: true, generator_value: 'autosave' }),
 ```
 
 - `MainMenu` listens to it and turns it into a slot context purely for display:
-  - ``MainMenu.js:33`` — `addPropertyListener(this.SAVES_CONTEXT, 'continueSlotName', this.onContinueSlotNameChange)`
-  - ``MainMenu.js:118-127`` — turns the name into `currentSaveCtx = ['Save','Saves',<name>]`, skipping it if `corruptSave`
-  - ``MainMenu.js:239`` — initial read
+  - [`MainMenu.js:33`](E:/FModel/Output/Exports/F1Manager24/Content/UIGameface/js/project/modules/frontend/components/MainMenu.js#L33) — `addPropertyListener(this.SAVES_CONTEXT, 'continueSlotName', this.onContinueSlotNameChange)`
+  - [`MainMenu.js:118-127`](E:/FModel/Output/Exports/F1Manager24/Content/UIGameface/js/project/modules/frontend/components/MainMenu.js#L118) — turns the name into `currentSaveCtx = ['Save','Saves',<name>]`, skipping it if `corruptSave`
+  - [`MainMenu.js:239`](E:/FModel/Output/Exports/F1Manager24/Content/UIGameface/js/project/modules/frontend/components/MainMenu.js#L239) — initial read
 - `currentSaveCtx` then feeds only `FrontendContinueButton` (`MainMenu.js:66`) and the "has a save?" booleans (`MainMenu.js:151`, `:160`).
 
 So: **the native game owns `continueSlotName`.** The UI's only contribution is the default
-literal `'autosave'` at ``Saves.js:59``. The engine writes the real value (which slot
+literal `'autosave'` at [`Saves.js:59`](E:/FModel/Output/Exports/F1Manager24/Content/UIGameface/js/project/data/Saves.js#L59). The engine writes the real value (which slot
 Continue will resume) and then performs the load itself. **inferred**, but strongly: the UI sends
 no slot with the event, so the engine cannot be getting the slot from the event.
 
 **Note a casing discrepancy, unproven relevance:** the default is `'autosave'`
-(``Saves.js:59``), the per-slot contexts are `'autoSave'` / `'save1'..'save29'`
-(``Saves.js:13``). The GUI-driven value is very likely
+([`Saves.js:59`](E:/FModel/Output/Exports/F1Manager24/Content/UIGameface/js/project/data/Saves.js#L59)), the per-slot contexts are `'autoSave'` / `'save1'..'save29'`
+([`Saves.js:13`](E:/FModel/Output/Exports/F1Manager24/Content/UIGameface/js/project/data/Saves.js#L13)). The GUI-driven value is very likely
 `'autoSave'` (matching the contexts), so patching `continueSlotName` to a chosen save is plausible
 but **inferred and untested**.
 
@@ -735,7 +735,7 @@ is. `ContinueGame` means "resume whatever the engine considers the continue slot
 
 **Two raising paths, both in `LoadSaveScreen`.**
 
-Fast path (not in-game), ``LoadSaveScreen.js:125-130``:
+Fast path (not in-game), [`LoadSaveScreen.js:125-130`](E:/FModel/Output/Exports/F1Manager24/Content/UIGameface/js/project/modules/loadSave/LoadSaveScreen.js#L125):
 
 ```js
 onSelectLoadData = () => {
@@ -747,7 +747,7 @@ onSelectLoadData = () => {
     else { ... confirmation dialog ... }
 ```
 
-Confirm path (shared with the in-game flow), ``LoadSaveScreen.js:147-149``:
+Confirm path (shared with the in-game flow), [`LoadSaveScreen.js:147-149`](E:/FModel/Output/Exports/F1Manager24/Content/UIGameface/js/project/modules/loadSave/LoadSaveScreen.js#L147):
 
 ```js
 onConfirmChoice = () => {
@@ -756,18 +756,18 @@ onConfirmChoice = () => {
 ```
 
 `getConfirmSelectionEvent()` maps the confirmation state to an event name
-(``LoadSaveScreen.js:163-176``):
+([`LoadSaveScreen.js:163-176`](E:/FModel/Output/Exports/F1Manager24/Content/UIGameface/js/project/modules/loadSave/LoadSaveScreen.js#L163)):
 
 | `ConfirmationState` | event | line |
 |---|---|---|
-| `LoadGame` | `LoadGame` | ``:169`` |
+| `LoadGame` | `LoadGame` | [`:169`](E:/FModel/Output/Exports/F1Manager24/Content/UIGameface/js/project/modules/loadSave/LoadSaveScreen.js#L169) |
 | `CorruptData` | `RestoreData` | `:171` |
 | `DeleteData` | `DeleteGame` | `:173` |
 | `OverwriteData` | `SaveGame` | `:175` |
 
 **Where the argument is read from:** `DS.getValueAsString(this.state.selectedSlotCtx, 'slotName')`,
 i.e. the DataStore property `slotName` on the slot context the player selected. Those contexts and
-their `slotName` values are declared in ``Saves.js:12-24``:
+their `slotName` values are declared in [`Saves.js:12-24`](E:/FModel/Output/Exports/F1Manager24/Content/UIGameface/js/project/data/Saves.js#L12):
 
 ```js
 for (let i = 0; i < 30; i++) {
@@ -781,17 +781,17 @@ list as strings**, because they are returned from `getConfirmSelectionEvent`, no
 the `sendEvent` call. Treat them as real events. (They are absent from the 352 table for that
 reason — see §5.)
 
-**Confirmed-by-the-project:** [`LOAD-SAVE-CALL.md`](LOAD-SAVE-CALL.md) already documents this call
+**Confirmed-by-the-project:** [`LOAD-SAVE-CALL.md`](E:/Downloads/coop-anything-main/local/f1-manager-2024/LOAD-SAVE-CALL.md) already documents this call
 and the 30-name slot space; the `file:line` above (128) matches this re-read exactly.
 
 ### 3.3 `AdvanceToNextEvent` — and a serious caveat about reading `ContinueButtonContainer`
 
 `AdvanceToNextEvent` is raised from five places (§2.4). The one that matters is the shared Advance
 button, `ContinueButtonContainer`, mounted by `TeamManagementModule`
-(``TeamManagementModule.js:107``), `Inbox`
-(``Inbox.js:173``) and indirectly others.
+([`TeamManagementModule.js:107`](E:/FModel/Output/Exports/F1Manager24/Content/UIGameface/js/project/modules/teamManagement/TeamManagementModule.js#L107)), `Inbox`
+([`Inbox.js:173`](E:/FModel/Output/Exports/F1Manager24/Content/UIGameface/js/project/modules/inbox/Inbox.js#L173)) and indirectly others.
 
-**Read the guard first.** ``ContinueButtonContainer.js:149-153``:
+**Read the guard first.** [`ContinueButtonContainer.js:149-153`](E:/FModel/Output/Exports/F1Manager24/Content/UIGameface/js/project/components/ContinueButtonContainer.js#L149):
 
 ```js
 onSelect = () => {
@@ -817,37 +817,37 @@ switch (this.state.advanceType) { ... }       // :158
 ```
 
 `isAdvancing` is DataStore-backed, not local: it mirrors `['MainHud'].advancing`
-(``ContinueButtonContainer.js:29``
+([`ContinueButtonContainer.js:29`](E:/FModel/Output/Exports/F1Manager24/Content/UIGameface/js/project/components/ContinueButtonContainer.js#L29)
 `addPropertyListener(['MainHud'], 'advancing', this.onAdvancingChange)`), and the render swaps the
 button to the STOP face while it is true
-(``ContinueButtonContainer.js:47``
+([`ContinueButtonContainer.js:47`](E:/FModel/Output/Exports/F1Manager24/Content/UIGameface/js/project/components/ContinueButtonContainer.js#L47)
 `const advanceType = isAdvancing ? AdvanceType.TeamManagementStop : state.advanceType`).
 
 So the real sequence for "Continue" is:
 
 1. Press 1 → `advanceType === TeamManagementContinue` → `this.setState({ isAdvancing: true })` then
-   `sendEvent('AdvanceToNextEvent')` (``ContinueButtonContainer.js:174-177``).
+   `sendEvent('AdvanceToNextEvent')` ([`ContinueButtonContainer.js:174-177`](E:/FModel/Output/Exports/F1Manager24/Content/UIGameface/js/project/components/ContinueButtonContainer.js#L174)).
    The engine begins advancing and sets `MainHud.advancing = true`.
-2. While advancing, the panel ``TimeProgressionPanel`` shows the **STOP** button.
+2. While advancing, the panel [`TimeProgressionPanel`](E:/FModel/Output/Exports/F1Manager24/Content/UIGameface/js/project/modules/teamManagement/TimeProgressionPanel.js#L74) shows the **STOP** button.
 3. Press 2 on STOP → `onStopAdvancing` → `sendEvent('AdvanceToNextEvent')`
-   (``TimeProgressionPanel.js:146-153``). The engine interprets a second
+   ([`TimeProgressionPanel.js:146-153`](E:/FModel/Output/Exports/F1Manager24/Content/UIGameface/js/project/modules/teamManagement/TimeProgressionPanel.js#L146)). The engine interprets a second
    `AdvanceToNextEvent` while already advancing as "stop".
 
 **This is why a single scripted `AdvanceToNextEvent` can look swallowed:** the *same event name*
 means start-then-stop. Firing it twice in quick succession can start and immediately stop the
 advance. This is a real hazard for the bridge's existing `Advance <n>` loop, which spaces repeats
-by 1200 ms ([`bridge.js`](../pak/f1manager24/Content/UIGameface/js/coop/bridge.js) `advance` branch).
+by 1200 ms ([`bridge.js`](E:/Downloads/coop-anything-main/local/f1-manager-2024/pak/f1manager24/Content/UIGameface/js/coop/bridge.js) `advance` branch).
 
 Also note: `isAdvancing` is reset by the engine writing `MainHud.advancing = false`, which
-`TimeProgressionPanel` observes at ``TimeProgressionPanel.js:18``.
+`TimeProgressionPanel` observes at [`TimeProgressionPanel.js:18`](E:/FModel/Output/Exports/F1Manager24/Content/UIGameface/js/project/modules/teamManagement/TimeProgressionPanel.js#L18).
 `advanceType === ToPerformanceTargets` also forces it false
-(``ContinueButtonContainer.js:117-119``).
+([`ContinueButtonContainer.js:117-119`](E:/FModel/Output/Exports/F1Manager24/Content/UIGameface/js/project/components/ContinueButtonContainer.js#L117)).
 
 ### 3.3.1 Every `AdvanceType` value: label and what the button actually does
 
-`AdvanceType` enum: ``AdvanceTypesData.js:7-49``
+`AdvanceType` enum: [`AdvanceTypesData.js:7-49`](E:/FModel/Output/Exports/F1Manager24/Content/UIGameface/js/project/data/AdvanceTypesData.js#L7)
 (43 values, `Continue = 0` … `ToRaceWeekend = 42`). Labels from `getButtonData`
-(``AdvanceTypesData.js:51`` onward).
+([`AdvanceTypesData.js:51`](E:/FModel/Output/Exports/F1Manager24/Content/UIGameface/js/project/data/AdvanceTypesData.js#L51) onward).
 
 Classification is against `ContinueButtonContainer.onSelect` + `getAdvanceTypeScreen`. There are
 three behaviours: **sends** `AdvanceToNextEvent`; **navigates** to another TeamManagement screen;
@@ -855,29 +855,29 @@ three behaviours: **sends** `AdvanceToNextEvent`; **navigates** to another TeamM
 
 | # | AdvanceType | label locstring | behaviour |
 |---|---|---|---|
-| 0 | `Continue` | `[CONTINUE]` (default arm) | **does nothing** — falls to `default:`, `getAdvanceTypeScreen()` returns `undefined` (``:207-213``) |
-| 1 | `ToRequiredResponse` | `[CANNOT_ADVANCE_REQUIRES_RESPONSE]` / `[CANNOT_ADVANCE_GOTO_MAIL]` | **navigates** → `ScreenID.Inbox` (``:159-166``) |
-| 2 | `ToImportantEmail` | `[ADVANCE_IMPORTANT]` / `[CANNOT_ADVANCE_GOTO_MAIL]` | **navigates** → `ScreenID.Inbox` (``:167-173``) |
-| 3 | `TeamManagementContinue` | `[CONTINUE]` | **sends** `AdvanceToNextEvent` (``:174-178``) |
-| 4 | `TeamManagementStop` | `[STOP]` | **sends** `AdvanceToNextEvent` — via `TimeProgressionPanel.onStopAdvancing` (``TimeProgressionPanel.js:152``); also fires via the `isAdvancing` early-return |
-| 5 | `ToRaceBonusOptions` | `[EVENTS_TO_RACE_TARGETS]` | **navigates** → `ScreenID.SponsorTargetsPreRaceDriver` (``:184-188``) |
+| 0 | `Continue` | `[CONTINUE]` (default arm) | **does nothing** — falls to `default:`, `getAdvanceTypeScreen()` returns `undefined` ([`:207-213`](E:/FModel/Output/Exports/F1Manager24/Content/UIGameface/js/project/components/ContinueButtonContainer.js#L207)) |
+| 1 | `ToRequiredResponse` | `[CANNOT_ADVANCE_REQUIRES_RESPONSE]` / `[CANNOT_ADVANCE_GOTO_MAIL]` | **navigates** → `ScreenID.Inbox` ([`:159-166`](E:/FModel/Output/Exports/F1Manager24/Content/UIGameface/js/project/components/ContinueButtonContainer.js#L159)) |
+| 2 | `ToImportantEmail` | `[ADVANCE_IMPORTANT]` / `[CANNOT_ADVANCE_GOTO_MAIL]` | **navigates** → `ScreenID.Inbox` ([`:167-173`](E:/FModel/Output/Exports/F1Manager24/Content/UIGameface/js/project/components/ContinueButtonContainer.js#L167)) |
+| 3 | `TeamManagementContinue` | `[CONTINUE]` | **sends** `AdvanceToNextEvent` ([`:174-178`](E:/FModel/Output/Exports/F1Manager24/Content/UIGameface/js/project/components/ContinueButtonContainer.js#L174)) |
+| 4 | `TeamManagementStop` | `[STOP]` | **sends** `AdvanceToNextEvent` — via `TimeProgressionPanel.onStopAdvancing` ([`TimeProgressionPanel.js:152`](E:/FModel/Output/Exports/F1Manager24/Content/UIGameface/js/project/modules/teamManagement/TimeProgressionPanel.js#L152)); also fires via the `isAdvancing` early-return |
+| 5 | `ToRaceBonusOptions` | `[EVENTS_TO_RACE_TARGETS]` | **navigates** → `ScreenID.SponsorTargetsPreRaceDriver` ([`:184-188`](E:/FModel/Output/Exports/F1Manager24/Content/UIGameface/js/project/components/ContinueButtonContainer.js#L184)) |
 | 6 | `ToDriverScout` | `[ADVANCE_BLOCKED]` + driver sublabel | **navigates** → `ScoutingSearchDrivers` |
 | 7 | `ToDesignerScout` | `[ADVANCE_BLOCKED]` / `[CANNOT_ADVANCE_NO_CHIEF_DESIGNER]` | **navigates** → `ScoutingSearchChiefDesigners` |
 | 8 | `ToAerodynamicsScout` | `[ADVANCE_BLOCKED]` / `[CANNOT_ADVANCE_NO_AERODYNAMICS]` | **navigates** → `ScoutingSearchHOA` |
 | 9 | `ToEngineerScout` | `[ADVANCE_BLOCKED]` / `[CANNOT_ADVANCE_NO_RACE_ENGINEER]` | **navigates** → `ScoutingSearchRaceEngineers` |
 | 10 | `ToMechanicScout` | `[ADVANCE_BLOCKED]` / `[CANNOT_ADVANCE_NO_SPORTING_DIRECTOR]` | **navigates** → `ScoutingSearchChiefMechanic` |
-| 11 | `ToCarBuild` | `[ADVANCE_BLOCKED]` / `[PRE_SESSION_MISSING_CAR_PART]` | **navigates** → `CarBuild1` or `CarBuild2` (``:238-247``) |
-| 12 | `ToPerformanceTargets` | `[ADVANCE_IMPORTANT]` / `[CANNOT_ADVANCE_PERFORMANCE_TARGETS]` | **does nothing** — empty `case`, falls through to `:207` default; `getAdvanceTypeScreen()` has an empty block (``:248-250``) |
+| 11 | `ToCarBuild` | `[ADVANCE_BLOCKED]` / `[PRE_SESSION_MISSING_CAR_PART]` | **navigates** → `CarBuild1` or `CarBuild2` ([`:238-247`](E:/FModel/Output/Exports/F1Manager24/Content/UIGameface/js/project/components/ContinueButtonContainer.js#L238)) |
+| 12 | `ToPerformanceTargets` | `[ADVANCE_IMPORTANT]` / `[CANNOT_ADVANCE_PERFORMANCE_TARGETS]` | **does nothing** — empty `case`, falls through to `:207` default; `getAdvanceTypeScreen()` has an empty block ([`:248-250`](E:/FModel/Output/Exports/F1Manager24/Content/UIGameface/js/project/components/ContinueButtonContainer.js#L248)) |
 | 13 | `ToPreSeasonFlow` | `[ADVANCE_TO_NEW_SEASON]` / `[ADVANCE_TO_NEW_SEASON_DESCR]` | **navigates** → `WelcomeToNewSeason` |
-| 14 | `ToPitCrewDevelopment` | `[TM_PITCREW_TRAIN_SCHEDULE]` / `[ADVANCE_TO_PITCREW_TRAINING_DESC]` | **navigates** → `TMPitCrewDevelopment` (``:179-183``) |
-| 15 | `ToSponsorPackageSelection` | `[PRE_SEASON_SPONSOR_SELECTION]` / `[SPONSORSHIP_SELECT_SPONSORS_SUBLABEL]` | **navigates** → `SponsorshipSelection` (``:195-198``) |
-| 16 | `ToEngagementActivitiesSelection` | `[EVENT_SPONSORSHIP_SPONSOR_ACTIVITY_SCHEDULE]` / `[SPONSORSHIP_SELECT_ENGAGEMENT_ACTIVITIES_SUBLABEL]` | **navigates** → `SponsorshipPlan` (``:200-206``) |
+| 14 | `ToPitCrewDevelopment` | `[TM_PITCREW_TRAIN_SCHEDULE]` / `[ADVANCE_TO_PITCREW_TRAINING_DESC]` | **navigates** → `TMPitCrewDevelopment` ([`:179-183`](E:/FModel/Output/Exports/F1Manager24/Content/UIGameface/js/project/components/ContinueButtonContainer.js#L179)) |
+| 15 | `ToSponsorPackageSelection` | `[PRE_SEASON_SPONSOR_SELECTION]` / `[SPONSORSHIP_SELECT_SPONSORS_SUBLABEL]` | **navigates** → `SponsorshipSelection` ([`:195-198`](E:/FModel/Output/Exports/F1Manager24/Content/UIGameface/js/project/components/ContinueButtonContainer.js#L195)) |
+| 16 | `ToEngagementActivitiesSelection` | `[EVENT_SPONSORSHIP_SPONSOR_ACTIVITY_SCHEDULE]` / `[SPONSORSHIP_SELECT_ENGAGEMENT_ACTIVITIES_SUBLABEL]` | **navigates** → `SponsorshipPlan` ([`:200-206`](E:/FModel/Output/Exports/F1Manager24/Content/UIGameface/js/project/components/ContinueButtonContainer.js#L200)) |
 | 17 | `ToPracticeSessionPrep` | `[TO_NEXT_EVENT_SESSION_PREP_TITLE]` / `[TO_NEXT_EVENT_SESSION_PREP_SUBTITLE]` | **does nothing** — no case, no screen |
 | 18 | `ToPracticeSession1` | `[TO_NEXT_EVENT_TO_P1]` | **does nothing** — no case, no screen |
 | 19 | `ToPracticeSession2` | `[TO_NEXT_EVENT_TO_P2]` | **does nothing** |
 | 20 | `ToPracticeSession3` | `[TO_NEXT_EVENT_TO_P3]` | **does nothing** |
 | 21 | `ToQualifying` | `[PRE_SESSION_QUALIFYING_START]` / `[TO_NEXT_EVENT_QUALIFYING]` | **does nothing** |
-| 22 | `ToRace` | `[PRE_SESSION_RACE_START]` / `[TO_NEXT_EVENT_RACESTART]` | **sends** `AdvanceToNextEvent` (``:189-193``) |
+| 22 | `ToRace` | `[PRE_SESSION_RACE_START]` / `[TO_NEXT_EVENT_RACESTART]` | **sends** `AdvanceToNextEvent` ([`:189-193`](E:/FModel/Output/Exports/F1Manager24/Content/UIGameface/js/project/components/ContinueButtonContainer.js#L189)) |
 | 23 | `ToNextDesignScreen` | `[CONTINUE]` | **does nothing** |
 | 24 | `ConfirmTraining` | `[CONFIRM]` | **does nothing** |
 | 25 | `ConfirmDesign` | `[CONFIRM]` | **does nothing** |
@@ -896,15 +896,15 @@ three behaviours: **sends** `AdvanceToNextEvent`; **navigates** to another TeamM
 | 38 | `ConfirmPreSeasonSponsors` | `[CONFIRM]` | **does nothing** |
 | 39 | `PreRaceTargetsBlocked` | `[ADVANCE_BLOCKED]` / `[SPONSOR_TARGETS_RACE_DRIVER_BLOCKED]` | **does nothing** (its screen handles `onContinue` itself) |
 | 40 | `PreRaceTargetsDriver2` | `[CUSTOM_TEAM_NEXT_STEP]` / `[SPONSOR_TARGETS_RACE_DRIVER_2_CONTINUE]` | **does nothing** here; handled in `SponsorTargetsPreRaceDriver.onContinue` |
-| 41 | `PreRaceTargetsToRaceWeekend` | `[CONFIRM]` / `[TO_NEXT_EVENT_SESSION_PREP_TITLE]` | **does nothing** here; `SponsorTargetsPreRaceDriver` sends `ConfirmSponsorRaceBonuses` **and** `AdvanceToNextEvent` (``SponsorTargetsPreRaceDriver.js:186-189``) |
-| 42 | `ToRaceWeekend` | `[TO_NEXT_EVENT_RACE]` | **sends** `AdvanceToNextEvent` (``:189-193``) |
+| 41 | `PreRaceTargetsToRaceWeekend` | `[CONFIRM]` / `[TO_NEXT_EVENT_SESSION_PREP_TITLE]` | **does nothing** here; `SponsorTargetsPreRaceDriver` sends `ConfirmSponsorRaceBonuses` **and** `AdvanceToNextEvent` ([`SponsorTargetsPreRaceDriver.js:186-189`](E:/FModel/Output/Exports/F1Manager24/Content/UIGameface/js/project/modules/sponsorTargets/SponsorTargetsPreRaceDriver.js#L186)) |
+| 42 | `ToRaceWeekend` | `[TO_NEXT_EVENT_RACE]` | **sends** `AdvanceToNextEvent` ([`:189-193`](E:/FModel/Output/Exports/F1Manager24/Content/UIGameface/js/project/components/ContinueButtonContainer.js#L189)) |
 
 **The important shape of this table:** only 3 of 43 `AdvanceType` values send
 `AdvanceToNextEvent` from the shared button (`TeamManagementContinue`, `ToRaceWeekend`, `ToRace`),
 plus the `isAdvancing` early-return and the STOP button. Everything else either navigates or is
 inert. The actual `advanceType` is not chosen by the UI — it is read from the DataStore property
 `['Calendar','NextEvent'].advanceType`
-(``ContinueButtonContainer.js:28``), i.e. **the engine decides what the Advance
+([`ContinueButtonContainer.js:28`](E:/FModel/Output/Exports/F1Manager24/Content/UIGameface/js/project/components/ContinueButtonContainer.js#L28)), i.e. **the engine decides what the Advance
 button will do next.** **inferred:** a scripted `AdvanceToNextEvent` therefore does whatever the
 engine currently thinks "next" is, and a `LoadGame`/`ContinueGame` that lands on a race weekend sets
 `advanceType` to `ToRaceWeekend`/`ToRace` (the "send" set), which is consistent with the field
@@ -920,7 +920,7 @@ there. It is **unknown** whether the engine still acts on it.
 
 ### 3.4 `NextMonthSelected` / `PreviousMonthSelected`
 
-``project/modules/calendar/CalendarContents.js:276-295``:
+[`project/modules/calendar/CalendarContents.js:276-295`](E:/FModel/Output/Exports/F1Manager24/Content/UIGameface/js/project/modules/calendar/CalendarContents.js#L276):
 
 ```js
 onMonthUp = (isRepeatPress, e) => {
@@ -945,14 +945,7 @@ onMonthDown = (isRepeatPress, e) => {
 ### 3.5 Starting a race session — the answer
 
 **There is no Gameface event that starts a race session.** This is a proven statement about the
-export, not a failure to find one — and it is a statement about **the UI layer only**.
-
-Read it precisely, because the loose version of it is misleading: session start *is* mapped from the
-exe. §3.5.1 lists the session-flow commands the binary contains and the UI never sends
-(`StageProceed` at `0x5fa7c98`, `TravelToRaceWeekend` at `0x5fcac28`). Starting a session is what the
-**advance weekend button** does, not a standalone event, so the absence of a "start" event in the UI is
-expected rather than surprising. What follows is the evidence that no *UI* event does it, and §3.5.1 is
-where the untried candidates are.
+export, not a failure to find one:
 
 1. The two events named in the brief's hypothesis are not session starts.
    `AdvanceToNextEvent` is a TeamManagement calendar-advance (§3.3) and its only raising
@@ -962,7 +955,7 @@ where the untried candidates are.
    `PlayOrSimClosed`, `SimulateSingleSession`, `SimulateRemainingEvent`,
    `SimulateToRaceOrSprint`, and `AdvanceToNextStage`. Each is triggered by a specific button; none
    is a generic "start". Their handlers, verbatim from the export:
-   - `PreSessionClosed` — ``PresessionView.js:242-252``:
+   - `PreSessionClosed` — [`PresessionView.js:242-252`](E:/FModel/Output/Exports/F1Manager24/Content/UIGameface/js/project/modules/raceWeekend/PresessionView.js#L242):
      ```js
      onAdvanceNext = () => {
          const powertrainPartViolatesPenaltyCar1 = DS.getValue(['Parts'], 'powertrainPartViolatesPenaltyCar1');
@@ -972,7 +965,7 @@ where the untried candidates are.
          else { (0, Engine_1.sendEvent)('PreSessionClosed'); }
      };
      ```
-   - `SessionOverviewClosed` — ``SessionOverview.js:147-153``:
+   - `SessionOverviewClosed` — [`SessionOverview.js:147-153`](E:/FModel/Output/Exports/F1Manager24/Content/UIGameface/js/project/modules/raceWeekend/SessionOverview/SessionOverview.js#L147):
      ```js
      onAdvanceNext = () => {
          RaceWeekendApp_1.persistentScreenData.resetAllStatesForId(...SessionOverview);
@@ -983,29 +976,29 @@ where the untried candidates are.
      Note the UI navigation to `PreSession` is **inside the `isCoherentPlayer()` guard**, so in the
      shipped game the UI does not navigate itself — the engine drives the screen change (via
      `SetRaceView`, §3.6).
-   - `PlayOrSimClosed` — ``SessionOptions.js:121-129``: the "Manage / Go to session" confirm; sends only the event plus `onResetTabState()`. It does **not** navigate.
+   - `PlayOrSimClosed` — [`SessionOptions.js:121-129`](E:/FModel/Output/Exports/F1Manager24/Content/UIGameface/js/project/modules/raceWeekend/simulatingSessions/SessionOptions.js#L121): the "Manage / Go to session" confirm; sends only the event plus `onResetTabState()`. It does **not** navigate.
    - `SimulateSingleSession` / `SimulateRemainingEvent` / `SimulateToRaceOrSprint` —
-     ``SessionOptions.js:130-159``. Each sends one event **and then** navigates to
+     [`SessionOptions.js:130-159`](E:/FModel/Output/Exports/F1Manager24/Content/UIGameface/js/project/modules/raceWeekend/simulatingSessions/SessionOptions.js#L130). Each sends one event **and then** navigates to
      `ScreenID.SimulatingSessions`, passing `simulateSessions` as screen config. The sim itself is
      **not** driven from JS.
-   - `AdvanceToNextStage` — ``SessionResults.js:17-19`` and six post-session views. This advances
+   - `AdvanceToNextStage` — [`SessionResults.js:17-19`](E:/FModel/Output/Exports/F1Manager24/Content/UIGameface/js/project/modules/raceWeekend/sessionResults/SessionResults.js#L17) and six post-session views. This advances
      *within* the weekend after a session has finished; it cannot be the thing that starts one.
 
 3. **The confirming negative.** `SimulatingSessions` — the screen that is on-screen while a session
    simulates — has no start call in it. Its whole lifecycle is a throbber that watches a DataStore
    property:
 
-   - ``SimulatingSessions.js:19``:
+   - [`SimulatingSessions.js:19`](E:/FModel/Output/Exports/F1Manager24/Content/UIGameface/js/project/modules/raceWeekend/simulatingSessions/SimulatingSessions.js#L19):
      `DS.getPropertyListener(['Weekend'], 'isSimulating', value => this.updateThrobberState(!!value, ...))`
-   - ``SimulatingSessions.js:20``: a 3 s floor so the spinner is visible.
-   - ``SimulatingSessions.js:57-62``: when `isSimulating` goes false and the floor has elapsed, advance the animation.
-   - ``SimulatingSessions.js:67-71``: the Continue button, once visible, sends `ShowSimulationResults`.
+   - [`SimulatingSessions.js:20`](E:/FModel/Output/Exports/F1Manager24/Content/UIGameface/js/project/modules/raceWeekend/simulatingSessions/SimulatingSessions.js#L20): a 3 s floor so the spinner is visible.
+   - [`SimulatingSessions.js:57-62`](E:/FModel/Output/Exports/F1Manager24/Content/UIGameface/js/project/modules/raceWeekend/simulatingSessions/SimulatingSessions.js#L57): when `isSimulating` goes false and the floor has elapsed, advance the animation.
+   - [`SimulatingSessions.js:67-71`](E:/FModel/Output/Exports/F1Manager24/Content/UIGameface/js/project/modules/raceWeekend/simulatingSessions/SimulatingSessions.js#L67): the Continue button, once visible, sends `ShowSimulationResults`.
 
    The UI **waits for the engine to flip `Weekend.isSimulating`**. It never starts anything. This is
    the single most direct proof that the session sim is engine-owned.
 
 **So what does the confirm button actually do instead?** It sends an event and then waits. Using the
-pre-session confirm (``PresessionView.js:117-125``, `onSelect: this.onAdvanceNext`):
+pre-session confirm ([`PresessionView.js:117-125`](E:/FModel/Output/Exports/F1Manager24/Content/UIGameface/js/project/modules/raceWeekend/PresessionView.js#L117), `onSelect: this.onAdvanceNext`):
 
 1. `onAdvanceNext` reads two DataStore properties (`Parts.powertrainPartViolatesPenaltyCar1/2`) to
    decide whether to show a penalty dialog.
@@ -1016,10 +1009,10 @@ pre-session confirm (``PresessionView.js:117-125``, `onSelect: this.onAdvanceNex
    ticking `RaceSim.raceTime`. The UI cannot be doing it, because (a) it sends nothing else and
    (b) every `DS.setValue` in the game throws in the shipped build (§1.3b).
 4. The UI then observes the result. `StageManager` holds a no-op listener on race time —
-   ``StageManager.js:74``:
+   [`StageManager.js:74`](E:/FModel/Output/Exports/F1Manager24/Content/UIGameface/js/project/modules/raceWeekend/utils/StageManager.js#L74):
    `this.createListener(ContextUtil_1.RACE_SIM_CONTEXT, 'raceTime', () => { });`
    — and `isPreSession()` is defined as `return this._raceTime == 0;`
-   (``StageManager.js:141-143``).
+   ([`StageManager.js:141-143`](E:/FModel/Output/Exports/F1Manager24/Content/UIGameface/js/project/modules/raceWeekend/utils/StageManager.js#L141)).
    **That matches the reported symptom exactly:** the sim object exists and is readable, `simtime`
    stays 0, and the UI considers itself "pre-session" — because the engine never acted.
 
@@ -1039,11 +1032,11 @@ inside those clusters sit the UI's own screen-id constants (`Inbox`, `Headquarte
 table, not coincidence.
 
 **The method validates itself.** §2.2 predicted the `Commands*TabSelected` family could not be
-enumerated from the UI because ``DriverPanel.js:411``
+enumerated from the UI because [`DriverPanel.js:411`](E:/FModel/Output/Exports/F1Manager24/Content/UIGameface/js/project/modules/raceWeekend/DriverPanel.js#L411)
 builds it as `'Commands' + DriverPanelMenu[index] + 'TabSelected'`. The binary contains exactly
 `CommandsDriverTabSelected` and `CommandsPitTabSelected` (**binary**, offsets `0x5fac000` and
 `0x5fac020`) — the two `DriverPanelMenu` values that are actually used
-(`Overview`/`Driver`/`Pit`/`CarSetup` at ``DriverPanel.js``). So the clusters are the
+(`Overview`/`Driver`/`Pit`/`CarSetup` at [`DriverPanel.js`](E:/FModel/Output/Exports/F1Manager24/Content/UIGameface/js/project/modules/raceWeekend/DriverPanel.js)). So the clusters are the
 binding table, and the cluster scan is trustworthy.
 
 **What that table contains that the UI does not.** Filtering the 12 clusters for identifiers that
@@ -1071,7 +1064,7 @@ reveals a handler body. But two conclusions are now well supported:
    inside the session-flow binding block. This is a much stronger lead than any UI event.
 
 **`StageProceed` vs `PreSessionClosed` — how they would differ (hypothesis, not proof.)**
-`PreSessionClosed` is sent by the pre-session *screen* (``PresessionView.js:250``),
+`PreSessionClosed` is sent by the pre-session *screen* ([`PresessionView.js:250`](E:/FModel/Output/Exports/F1Manager24/Content/UIGameface/js/project/modules/raceWeekend/PresessionView.js#L250)),
 i.e. it means "this dialog is done". `StageProceed` reads as "advance the weekend stage machinery",
 which is one level lower and would not depend on the dialog having been dismissed. If the reported
 symptom is that the sim sits at `simtime = 0` while the UI believes it is pre-session, firing
@@ -1102,15 +1095,15 @@ The post-session chain, all proven from the export:
 | step | screen | action | event |
 |---|---|---|---|
 | session finishes | engine | flips `Weekend.isSimulating` / `RaceSim.sessionState` | — |
-| results shown | `SimulatingSessions` | Continue | `ShowSimulationResults` (``:68``) |
-| | `SessionResults` | NEXT | `AdvanceToNextStage` (``:18``) |
-| | `PostPracticeSummaryView` | Continue | `AdvanceToNextStage` (``:81``) |
-| | `PostQualifyingSummaryView` | Continue (350 ms delayed if both drivers eliminated) | `AdvanceToNextStage` (``:135``, ``:139``) |
+| results shown | `SimulatingSessions` | Continue | `ShowSimulationResults` ([`:68`](E:/FModel/Output/Exports/F1Manager24/Content/UIGameface/js/project/modules/raceWeekend/simulatingSessions/SimulatingSessions.js#L68)) |
+| | `SessionResults` | NEXT | `AdvanceToNextStage` ([`:18`](E:/FModel/Output/Exports/F1Manager24/Content/UIGameface/js/project/modules/raceWeekend/sessionResults/SessionResults.js#L18)) |
+| | `PostPracticeSummaryView` | Continue | `AdvanceToNextStage` ([`:81`](E:/FModel/Output/Exports/F1Manager24/Content/UIGameface/js/project/modules/raceWeekend/PostPracticeSummaryView.js#L81)) |
+| | `PostQualifyingSummaryView` | Continue (350 ms delayed if both drivers eliminated) | `AdvanceToNextStage` ([`:135`](E:/FModel/Output/Exports/F1Manager24/Content/UIGameface/js/project/modules/raceWeekend/PostQualifyingSummaryView.js#L135), [`:139`](E:/FModel/Output/Exports/F1Manager24/Content/UIGameface/js/project/modules/raceWeekend/PostQualifyingSummaryView.js#L139)) |
 | | `DriverPracticeGoals`, `FinancesView`, `PostPracticeConfidenceView` | Continue | `AdvanceToNextStage` |
-| post-race | `PostRaceSummaryView` | Continue (forces both standings tabs first) | `PostRaceSummaryClosed` (``:146``, ``:150``) |
-| post-race pits | `PostRaceSummaryViewPitStops` | Continue | `PostRacePitStopSummaryClosed` (``:95``) |
+| post-race | `PostRaceSummaryView` | Continue (forces both standings tabs first) | `PostRaceSummaryClosed` ([`:146`](E:/FModel/Output/Exports/F1Manager24/Content/UIGameface/js/project/modules/raceWeekend/PostRaceSummaryView.js#L146), [`:150`](E:/FModel/Output/Exports/F1Manager24/Content/UIGameface/js/project/modules/raceWeekend/PostRaceSummaryView.js#L150)) |
+| post-race pits | `PostRaceSummaryViewPitStops` | Continue | `PostRacePitStopSummaryClosed` ([`:95`](E:/FModel/Output/Exports/F1Manager24/Content/UIGameface/js/project/modules/raceWeekend/PostRaceSummaryViewPitStops.js#L95)) |
 | back | any session flow | Back | `OnStageBackwards` |
-| leave race weekend | Options → Exit | confirm | `QuitGame` (``RaceWeekendEvents.js:78``) |
+| leave race weekend | Options → Exit | confirm | `QuitGame` ([`RaceWeekendEvents.js:78`](E:/FModel/Output/Exports/F1Manager24/Content/UIGameface/js/project/modules/raceWeekend/RaceWeekendEvents.js#L78)) |
 
 **There is no event that returns to TeamManagement.** No event name in the 352 contains
 `TeamManagement`, `Return`, `Leave`, `EndRace` or `ExitRace` — verified by substring search over
@@ -1118,10 +1111,10 @@ the enumerated names. **inferred:** the engine swaps the document itself. The UI
 mechanism it uses is visible, though: the engine pushes screen changes into the app over event
 listeners, not events:
 
-- ``RaceWeekendModule.js:24-25`` — `addListener('SetRaceView', this.onSetRaceView)` and `addListener('SetPitView', this.onSetPitView)`
-- ``RaceWeekendModule.js:114-117`` — `onSetRaceView(value)` → `Engine`-driven `RaceWeekendNavigation.set(value)`
-- ``TeamManagementModule.js:56`` — `addListener('SetManagementScreenID', ...)`
-- ``FrontendModule.js:24`` — `addListener('SetFrontendScreenID', ...)`
+- [`RaceWeekendModule.js:24-25`](E:/FModel/Output/Exports/F1Manager24/Content/UIGameface/js/project/modules/raceWeekend/RaceWeekendModule.js#L24) — `addListener('SetRaceView', this.onSetRaceView)` and `addListener('SetPitView', this.onSetPitView)`
+- [`RaceWeekendModule.js:114-117`](E:/FModel/Output/Exports/F1Manager24/Content/UIGameface/js/project/modules/raceWeekend/RaceWeekendModule.js#L114) — `onSetRaceView(value)` → `Engine`-driven `RaceWeekendNavigation.set(value)`
+- [`TeamManagementModule.js:56`](E:/FModel/Output/Exports/F1Manager24/Content/UIGameface/js/project/modules/teamManagement/TeamManagementModule.js#L56) — `addListener('SetManagementScreenID', ...)`
+- [`FrontendModule.js:24`](E:/FModel/Output/Exports/F1Manager24/Content/UIGameface/js/project/modules/frontend/FrontendModule.js#L24) — `addListener('SetFrontendScreenID', ...)`
 
 These are **engine→UI** channels (`engine.on`), so they are the correct hook for *detecting* engine
 driven transitions, and they are invisible to a wrapper around `engine.trigger`.
@@ -1137,39 +1130,39 @@ Scope: the events that can move the career or the weekend. Label definitions per
 - `SAFE only from <page>` — the handler tears down or replaces the current document.
 - `UNKNOWN` — the export cannot say.
 
-The two proven-destructive cases are carried over from [`LOBBY-GATE.md`](LOBBY-GATE.md),
+The two proven-destructive cases are carried over from [`LOBBY-GATE.md`](E:/Downloads/coop-anything-main/local/f1-manager-2024/LOBBY-GATE.md),
 which records a live black screen (process alive, front-end never rebuilt) when `LoadGame` is fired
 from inside a career. That observation is **not** re-verified here; it is relied on as prior
 evidence.
 
 | event | class | reason / evidence |
 |---|---|---|
-| `ContinueGame` | **SAFE only from `Frontend.html`** | Only raiser is `MainMenu` (``MainMenu.js:148``), a front-end component. It loads a career, i.e. replaces the document. Live-confirmed to black-screen from an in-game page ([`LOBBY-GATE.md`](LOBBY-GATE.md)). |
-| `LoadGame` | **SAFE only from `Frontend.html`** | Only raisers are `LoadSaveScreen` (``:128``, ``:149``); the fast path is explicitly gated on `!this.props.inGame` (``:126``). Live-confirmed destructive from an in-game page. |
-| `NewCareer` | **SAFE only from `Frontend.html`** | Three raisers, all front-end `onFadeToBlackEnd` handlers: ``CareerSettings.js:162``, ``CreateATeamPrincipal.js:60``, ``TeamSelectMenu.js:245``; starts a new world. Same category as `ContinueGame`. **inferred** (no live test recorded). |
-| `StartScenario` | **SAFE only from `Frontend.html`** | Raised only by scenario selection (``ScenarioChallengeSelection.js:103``, ``ScenarioTeamSelection.js:90``); loads a scenario world. **inferred** same teardown as a load. |
+| `ContinueGame` | **SAFE only from `Frontend.html`** | Only raiser is `MainMenu` ([`MainMenu.js:148`](E:/FModel/Output/Exports/F1Manager24/Content/UIGameface/js/project/modules/frontend/components/MainMenu.js#L148)), a front-end component. It loads a career, i.e. replaces the document. Live-confirmed to black-screen from an in-game page ([`LOBBY-GATE.md`](E:/Downloads/coop-anything-main/local/f1-manager-2024/LOBBY-GATE.md)). |
+| `LoadGame` | **SAFE only from `Frontend.html`** | Only raisers are `LoadSaveScreen` ([`:128`](E:/FModel/Output/Exports/F1Manager24/Content/UIGameface/js/project/modules/loadSave/LoadSaveScreen.js#L128), [`:149`](E:/FModel/Output/Exports/F1Manager24/Content/UIGameface/js/project/modules/loadSave/LoadSaveScreen.js#L149)); the fast path is explicitly gated on `!this.props.inGame` ([`:126`](E:/FModel/Output/Exports/F1Manager24/Content/UIGameface/js/project/modules/loadSave/LoadSaveScreen.js#L126)). Live-confirmed destructive from an in-game page. |
+| `NewCareer` | **SAFE only from `Frontend.html`** | Three raisers, all front-end `onFadeToBlackEnd` handlers: [`CareerSettings.js:162`](E:/FModel/Output/Exports/F1Manager24/Content/UIGameface/js/project/modules/frontend/components/CareerSettings.js#L162), [`CreateATeamPrincipal.js:60`](E:/FModel/Output/Exports/F1Manager24/Content/UIGameface/js/project/modules/frontend/components/CreateATeamPrincipal.js#L60), [`TeamSelectMenu.js:245`](E:/FModel/Output/Exports/F1Manager24/Content/UIGameface/js/project/modules/frontend/components/TeamSelectMenu.js#L245); starts a new world. Same category as `ContinueGame`. **inferred** (no live test recorded). |
+| `StartScenario` | **SAFE only from `Frontend.html`** | Raised only by scenario selection ([`ScenarioChallengeSelection.js:103`](E:/FModel/Output/Exports/F1Manager24/Content/UIGameface/js/project/modules/frontend/components/ScenarioMode/ScenarioChallengeSelection.js#L103), [`ScenarioTeamSelection.js:90`](E:/FModel/Output/Exports/F1Manager24/Content/UIGameface/js/project/modules/frontend/components/ScenarioMode/ScenarioTeamSelection.js#L90)); loads a scenario world. **inferred** same teardown as a load. |
 | `AdvanceToNextEvent` | **SAFE only from `TeamManagement.html`** | The only raising components are `ContinueButtonContainer` (mounted by `TeamManagementModule`, `Inbox`) and `TimeProgressionPanel` — both TeamManagement bundles. From `RaceWeekend.html` those modules are not loaded, so the event has no local context and its meaning is **unknown**; treat as unsafe there. From `Frontend.html` it has no meaning at all (no handler, no button). |
-| `NextMonthSelected` | **SAFE from any screen** | `CalendarContents.onMonthUp` (``:278``). Browsing only; no documented teardown; the handler is purely a view-range change. **inferred** safe — not live-tested. |
+| `NextMonthSelected` | **SAFE from any screen** | `CalendarContents.onMonthUp` ([`:278`](E:/FModel/Output/Exports/F1Manager24/Content/UIGameface/js/project/modules/calendar/CalendarContents.js#L278)). Browsing only; no documented teardown; the handler is purely a view-range change. **inferred** safe — not live-tested. |
 | `PreviousMonthSelected` | **SAFE from any screen** | Same, `:288`. |
 | `CalendarDaySelected` | **SAFE from any screen** | Two sites in `CalendarContents` (`:74` on unmount, `:334`); a report, not a command. |
-| `SessionOverviewClosed` | **SAFE only from `RaceWeekend.html`** | Raised by `SessionOverview` (``:149``); the component exists only in the RaceWeekend bundle. Engine enters a session on receipt (**inferred**), so firing it from elsewhere is meaningless and possibly harmful. |
-| `PreSessionClosed` | **SAFE only from `RaceWeekend.html`** | Raised by `_PreSessionView` (``:141``, ``:250``). **This is the closest thing to a session-start event**; see §3.5 for why it still does not start the sim. |
+| `SessionOverviewClosed` | **SAFE only from `RaceWeekend.html`** | Raised by `SessionOverview` ([`:149`](E:/FModel/Output/Exports/F1Manager24/Content/UIGameface/js/project/modules/raceWeekend/SessionOverview/SessionOverview.js#L149)); the component exists only in the RaceWeekend bundle. Engine enters a session on receipt (**inferred**), so firing it from elsewhere is meaningless and possibly harmful. |
+| `PreSessionClosed` | **SAFE only from `RaceWeekend.html`** | Raised by `_PreSessionView` ([`:141`](E:/FModel/Output/Exports/F1Manager24/Content/UIGameface/js/project/modules/raceWeekend/PresessionView.js#L141), [`:250`](E:/FModel/Output/Exports/F1Manager24/Content/UIGameface/js/project/modules/raceWeekend/PresessionView.js#L250)). **This is the closest thing to a session-start event**; see §3.5 for why it still does not start the sim. |
 | `AdvanceToNextStage` | **SAFE only from `RaceWeekend.html`** | Seven raisers, all under `project/modules/raceWeekend/`. Steps the weekend *within* a loaded race weekend. |
-| `PlayOrSimClosed` | **SAFE only from `RaceWeekend.html`** | `SessionOptions` (``:123``). |
+| `PlayOrSimClosed` | **SAFE only from `RaceWeekend.html`** | `SessionOptions` ([`:123`](E:/FModel/Output/Exports/F1Manager24/Content/UIGameface/js/project/modules/raceWeekend/simulatingSessions/SessionOptions.js#L123)). |
 | `SimulateSingleSession` | **SAFE only from `RaceWeekend.html`** | (`:132`) Mutates the weekend's simulation state. |
 | `SimulateRemainingEvent` | **SAFE only from `RaceWeekend.html`** | (`:142`) |
 | `SimulateToRaceOrSprint` | **SAFE only from `RaceWeekend.html`** | (`:152`) |
-| `ShowSimulationResults` | **SAFE only from `RaceWeekend.html`** | `SimulatingSessions` (``:68``). |
+| `ShowSimulationResults` | **SAFE only from `RaceWeekend.html`** | `SimulatingSessions` ([`:68`](E:/FModel/Output/Exports/F1Manager24/Content/UIGameface/js/project/modules/raceWeekend/simulatingSessions/SimulatingSessions.js#L68)). |
 | `OnStageBackwards` | **SAFE only from `RaceWeekend.html`** | Three raisers, all in the race-weekend bundle; rewinds a stage. |
 | `SkipCinematics` / `SkipCarReleaseCinematics` | **SAFE only from `RaceWeekend.html`** | One raiser is `FrontendCinematicsView.js:58` (`Frontend.html`); the other six are RaceWeekend. So the name itself is safe on both, but the **effect** differs by document. |
-| `PostRaceSummaryClosed` | **SAFE only from `RaceWeekend.html`** | (``:146``, `:150`) |
-| `PostRacePitStopSummaryClosed` | **SAFE only from `RaceWeekend.html`** | (``:95``) |
-| `SubmitActiveSessionSetup` / `CancelActiveSessionSetup` | **SAFE only from `RaceWeekend.html`** | `PitOptionsView` (``:208``, ``:242``). Arguments reference `carID`; firing blind risks corrupting the wrong car's setup. |
+| `PostRaceSummaryClosed` | **SAFE only from `RaceWeekend.html`** | ([`:146`](E:/FModel/Output/Exports/F1Manager24/Content/UIGameface/js/project/modules/raceWeekend/PostRaceSummaryView.js#L146), `:150`) |
+| `PostRacePitStopSummaryClosed` | **SAFE only from `RaceWeekend.html`** | ([`:95`](E:/FModel/Output/Exports/F1Manager24/Content/UIGameface/js/project/modules/raceWeekend/PostRaceSummaryViewPitStops.js#L95)) |
+| `SubmitActiveSessionSetup` / `CancelActiveSessionSetup` | **SAFE only from `RaceWeekend.html`** | `PitOptionsView` ([`:208`](E:/FModel/Output/Exports/F1Manager24/Content/UIGameface/js/project/modules/raceWeekend/PitOptionsView.js#L208), [`:242`](E:/FModel/Output/Exports/F1Manager24/Content/UIGameface/js/project/modules/raceWeekend/PitOptionsView.js#L242)). Arguments reference `carID`; firing blind risks corrupting the wrong car's setup. |
 | `SetPlaybackRate` / `SimPauseChange` | **SAFE only from `RaceWeekend.html`** | `RaceWeekendEvents.js:66,70`. Meaningless without a live sim. |
-| `QuitGame` | **UNKNOWN** | Two raisers: `MainMenu` (``MainMenu.js:222``) and `RaceWeekendEvents.js:78`; also wired to the Options Exit dialog (``OptionsMenu.js:56`` → `onQuitGame` at `:74-80`, which calls `QuitGame()` at `:79`). It is documented as the way back to the front-end but **has not been fired against a live game** ([`LOBBY-GATE.md`](LOBBY-GATE.md), "What is still unproven"). |
-| `RestartScenario` / `GameOverRetryLast5` / `GameOverRetrySeason` / `EnterTeamChangeFlow` | **UNKNOWN** | Load/rewrite the world. `GameOverScreen` (``:111`, `:115`, `:128``) lives in a RaceWeekend-reachable bundle, so these are demonstrably raisable in-game — but nothing records what the engine does. **Likely destructive; not tested.** |
-| `RestoreData` / `DeleteGame` / `SaveGame` | **UNKNOWN** | Not literal strings in the export; returned from `getConfirmSelectionEvent` (``LoadSaveScreen.js:163-176``). `DeleteGame`/`SaveGame` are certainly mutating. |
-| all `OptionsChange*`, `Options*` | **SAFE from any screen** | Options is an overlay mounted in every app (``OptionsMenu.js``). Settings changes, no teardown. **inferred.** |
+| `QuitGame` | **UNKNOWN** | Two raisers: `MainMenu` ([`MainMenu.js:222`](E:/FModel/Output/Exports/F1Manager24/Content/UIGameface/js/project/modules/frontend/components/MainMenu.js#L222)) and `RaceWeekendEvents.js:78`; also wired to the Options Exit dialog ([`OptionsMenu.js:56`](E:/FModel/Output/Exports/F1Manager24/Content/UIGameface/js/project/modules/options/OptionsMenu.js#L56) → `onQuitGame` at `:74-80`, which calls `QuitGame()` at `:79`). It is documented as the way back to the front-end but **has not been fired against a live game** ([`LOBBY-GATE.md`](E:/Downloads/coop-anything-main/local/f1-manager-2024/LOBBY-GATE.md), "What is still unproven"). |
+| `RestartScenario` / `GameOverRetryLast5` / `GameOverRetrySeason` / `EnterTeamChangeFlow` | **UNKNOWN** | Load/rewrite the world. `GameOverScreen` ([`:111`, `:115`, `:128`](E:/FModel/Output/Exports/F1Manager24/Content/UIGameface/js/project/modules/loadSave/GameOverScreen.js#L111)) lives in a RaceWeekend-reachable bundle, so these are demonstrably raisable in-game — but nothing records what the engine does. **Likely destructive; not tested.** |
+| `RestoreData` / `DeleteGame` / `SaveGame` | **UNKNOWN** | Not literal strings in the export; returned from `getConfirmSelectionEvent` ([`LoadSaveScreen.js:163-176`](E:/FModel/Output/Exports/F1Manager24/Content/UIGameface/js/project/modules/loadSave/LoadSaveScreen.js#L163)). `DeleteGame`/`SaveGame` are certainly mutating. |
+| all `OptionsChange*`, `Options*` | **SAFE from any screen** | Options is an overlay mounted in every app ([`OptionsMenu.js`](E:/FModel/Output/Exports/F1Manager24/Content/UIGameface/js/project/modules/options/OptionsMenu.js)). Settings changes, no teardown. **inferred.** |
 | `EndTutorial`, `SkipTutorial`, `TutorialStepComplete`, `HelpScreenRequestedByPlayer` | **SAFE from any screen** | Tutorial module is common to all apps (`project/modules/tutorial/`). |
 | `show_Toast`, `hide_Toast`, `hold`, `select`, `show`, `toggleOn`, `valueUp`, `valueDown`, `begin_simulating` | **not engine events** | These are `Audio.sendEvent` (`Audio.js:34,81`), which routes to `triggerListener('SendAudioEventMessage', ...)` (`Audio.js:56`). Cosmetic. |
 | everything else (editor, CAS, staff, scouting, HQ, finance, sponsors) | **SAFE from its own screen** | Local career edits; no document teardown. Deliberately not enumerated individually here — see §4.1. |
@@ -1179,13 +1172,13 @@ evidence.
 Two independent properties decide safety, and the export states both:
 
 1. **Is the raising component loaded in the current document?** The three `.html` entry points load
-   disjoint bundles (``Frontend.html`` →
-   `project/apps/FrontendApp.js`, ``RaceWeekend.html`` →
-   `RaceWeekendApp.js`, ``TeamManagement.html`` →
+   disjoint bundles ([`Frontend.html`](E:/FModel/Output/Exports/F1Manager24/Content/UIGameface/Frontend.html) →
+   `project/apps/FrontendApp.js`, [`RaceWeekend.html`](E:/FModel/Output/Exports/F1Manager24/Content/UIGameface/RaceWeekend.html) →
+   `RaceWeekendApp.js`, [`TeamManagement.html`](E:/FModel/Output/Exports/F1Manager24/Content/UIGameface/TeamManagement.html) →
    `TeamManagementApp.js`). Selecting and loading a save is a *front-end* verb; advancing the
    calendar is a *TeamManagement* verb; stepping a weekend is a *RaceWeekend* verb.
 2. **Does the engine handler replace the document?** Proven for the load family by live test
-   ([`LOBBY-GATE.md`](LOBBY-GATE.md)); for everything else this is **unknown** because the handler is native.
+   ([`LOBBY-GATE.md`](E:/Downloads/coop-anything-main/local/f1-manager-2024/LOBBY-GATE.md)); for everything else this is **unknown** because the handler is native.
 
 ---
 
@@ -1196,8 +1189,8 @@ Two independent properties decide safety, and the export states both:
    including `StageProceed` and `TravelToRaceWeekend`. What each handler *does* remains
    **inferred**/**unknown**. Nothing here proves that a given `sendEvent` causes a given effect.
 2. **No native UFUNCTION signatures or addresses.** `engine.call('GetGameOwner')`
-   (``Player.js:17``) and `callBoundFunction('GetDataStore')`
-   (``DataStore.js:231``) prove a name-based call channel exists. `Mappings.usmap` (41,679 name-pool
+   ([`Player.js:17`](E:/FModel/Output/Exports/F1Manager24/Content/UIGameface/js/common/core/Player.js#L17)) and `callBoundFunction('GetDataStore')`
+   ([`DataStore.js:231`](E:/FModel/Output/Exports/F1Manager24/Content/UIGameface/js/common/core/DataStore.js#L231)) prove a name-based call channel exists. `Mappings.usmap` (41,679 name-pool
    entries) now proves the UE reflection surface exists and exposes `GUIManager`,
    `GUIEventsManager`, `GUIEvents`, `MainMenuGUIEventsManager`, `ManagementGUIEventsManager`,
    `RaceSimGUIEventsManager`, `GUIMediator*` (20+ mediators) and `CohtmlJSEvent` — but it is a name
@@ -1213,9 +1206,9 @@ Two independent properties decide safety, and the export states both:
 5. **`RaceSim.sessionState` writers are invisible.** The enum exists and the UI *reads* it —
    `Inactive`, `Active`, `WaitingForLightsOut`, `CompleteCheckeredFlagWaved`,
    `CompleteAllCarsSeenCheckeredFlagOrStopped`, `CompleteAllCarsStopped`
-   (``GameTypes.js``, search `var ESessionState`) — and `sessionState` is declared on
-   the schema (``RaceSim.js:1070``), but **no UI code writes it**. Same for
-   `RaceSim.raceTime` (``RaceSim.js:1062``), `playbackRate` (`:1071`) and `isSimPaused`
+   ([`GameTypes.js`](E:/FModel/Output/Exports/F1Manager24/Content/UIGameface/js/project/data/GameTypes.js), search `var ESessionState`) — and `sessionState` is declared on
+   the schema ([`RaceSim.js:1070`](E:/FModel/Output/Exports/F1Manager24/Content/UIGameface/js/project/data/RaceSim.js#L1070)), but **no UI code writes it**. Same for
+   `RaceSim.raceTime` ([`RaceSim.js:1062`](E:/FModel/Output/Exports/F1Manager24/Content/UIGameface/js/project/data/RaceSim.js#L1062)), `playbackRate` (`:1071`) and `isSimPaused`
    (`:1072`): read many times, written only inside dead `isCoherentPlayer()` blocks. All four are
    engine-owned.
 6. **Three event names are unreachable by literal scan** and so missing from §2.3:
@@ -1232,7 +1225,7 @@ Two independent properties decide safety, and the export states both:
 8. **`continueSlotName` is engine-written; its writer is native.** Whether patching it before
    `ContinueGame` reliably redirects the load is **inferred and untested**.
 9. **`DS.setValue` from a script is not a usable lever.** Because `setValue` asserts on
-   `isCoherentPlayer()` (§1.3b, ``DataStore.js:167``), a bridge cannot force
+   `isCoherentPlayer()` (§1.3b, [`DataStore.js:167`](E:/FModel/Output/Exports/F1Manager24/Content/UIGameface/js/common/core/DataStore.js#L167)), a bridge cannot force
    `RaceSim.sessionState` or `raceTime` through the JS DataStore API in the shipped build. Writing
    those requires the native DataStore handle, not the UI.
 10. **Three live tests are missing and matter**, in this order of value:
@@ -1242,8 +1235,8 @@ Two independent properties decide safety, and the export states both:
     All are single-client, no-network tests, so they cannot be blocked on the relay.
 11. **`RaceWeekend.html` may not be a live document at all.** `RaceWeekendModule`'s initial view is
     `Engine.isCoherentPlayer() ? PostQualifyingSummary : SessionOverview`
-    (``RaceWeekendModule.js:12``), and it reports `RaceWeekendModuleReady` once
-    on mount (``:29``). Whether the engine keeps this document alive during a race or
+    ([`RaceWeekendModule.js:12`](E:/FModel/Output/Exports/F1Manager24/Content/UIGameface/js/project/modules/raceWeekend/RaceWeekendModule.js#L12)), and it reports `RaceWeekendModuleReady` once
+    on mount ([`:29`](E:/FModel/Output/Exports/F1Manager24/Content/UIGameface/js/project/modules/raceWeekend/RaceWeekendModule.js#L29)). Whether the engine keeps this document alive during a race or
     re-creates it per session is **unknown** — and that decides whether a bridge injected into it
     survives across sessions.
 
@@ -1276,7 +1269,7 @@ Get-ChildItem $p -Recurse -File -Filter *.js | Select-String -Pattern 'engine\.t
 
 | question | answer | confidence |
 |---|---|---|
-| Which slot does `ContinueGame` load? | The engine's `Save.Saves.continueSlotName`; the UI supplies only the default `'autosave'` (``Saves.js:59``) and never sends it as an argument. Use `LoadGame <slot>` to choose. | proven for the UI side; engine side inferred |
+| Which slot does `ContinueGame` load? | The engine's `Save.Saves.continueSlotName`; the UI supplies only the default `'autosave'` ([`Saves.js:59`](E:/FModel/Output/Exports/F1Manager24/Content/UIGameface/js/project/data/Saves.js#L59)) and never sends it as an argument. Use `LoadGame <slot>` to choose. | proven for the UI side; engine side inferred |
 | Which **UI** event starts a race session? | **None.** No Gameface event raised by the shipped UI starts a sim. The pre-session confirm sends `PreSessionClosed` and waits; the sim starts inside the engine. | proven (negative) |
 | Is there an engine command the UI never sends? | **Yes, and it is the best lead.** The exe contains `StageProceed` (`0x5fa7c98`) inside the session-flow binding block, plus `TravelToRaceWeekend` (`0x5fcac28`), `ReturnToMenu` (`0x5fc9cb0`) and `ToggleAutoNextDay` (`0x5fc9c80`) — none of which appear anywhere in the export. | binary-proven names; effect unknown |
 | What can a script legitimately drive? | `LoadGame`, `ContinueGame`, `AdvanceToNextEvent`, `NextMonthSelected`/`PreviousMonthSelected`, and the race-weekend screen-flow events (`SessionOverviewClosed`, `PreSessionClosed`, `AdvanceToNextStage`, `SkipCinematics`, …). | proven |
