@@ -1297,6 +1297,16 @@ fn handle_session(state: &mut SessionReceiver, msg: Msg) -> Option<String> {
 }
 
 /// Where a received session is written: the game's own SaveGames folder.
+///
+/// Not a fixed path. The game keeps a *set* of them - the machine this was written on has `SaveGames`,
+/// `SaveGames2`, `SaveGames4` and `SaveGamesS`, each a different profile's careers - and only one is live for
+/// the account in use. Writing to `SaveGames` unconditionally meant a client whose profile resolved to any other
+/// suffix would receive a fully transferred, hash-verified save into a folder the game never reads, and then
+/// report success. The symptom would be "the save arrived but LoadGame cannot find it", which is the hardest
+/// kind of bug to attribute.
+///
+/// So: `COOP_SAVE_DIR` if set (an explicit override always wins), otherwise the live folder chosen by
+/// [`live_save_dir`].
 fn session_dir() -> String {
     if let Ok(dir) = std::env::var("COOP_SAVE_DIR") {
         if !dir.is_empty() {
@@ -1304,9 +1314,77 @@ fn session_dir() -> String {
         }
     }
     match std::env::var("LOCALAPPDATA") {
-        Ok(local) => format!(r"{local}\F1Manager24\Saved\SaveGames"),
+        Ok(local) => live_save_dir(std::path::Path::new(&format!(r"{local}\F1Manager24\Saved"))),
         Err(_) => ".".to_string(),
     }
+}
+
+/// Picks which `SaveGames*` directory is the live one, given the game's `Saved` folder.
+///
+/// The rule is "most recently written", because that is what "live for this account" means in practice: the
+/// engine rewrites its own saves in the folder it is using (an autosave, or `customisation.sav` on exit), while
+/// the other profiles' folders sit unchanged. Comparing file mtimes rather than the engine's internal choice
+/// keeps this independent of a config format we have not reverse-engineered.
+///
+/// Ties and empties fall back deterministically: `SaveGames` first, then the lowest suffix, so the answer never
+/// depends on directory enumeration order. If `Saved` has no `SaveGames*` at all, return `SaveGames` anyway -
+/// the write will fail loudly with a real path in the message rather than silently landing in `.`.
+fn live_save_dir(saved: &std::path::Path) -> String {
+    let fallback = saved.join("SaveGames");
+    let entries = match std::fs::read_dir(saved) {
+        Ok(e) => e,
+        Err(_) => return fallback.to_string_lossy().into_owned(),
+    };
+
+    let mut best: Option<(std::time::SystemTime, String)> = None;
+    for e in entries.flatten() {
+        let path = e.path();
+        let name = match path.file_name().and_then(|n| n.to_str()) {
+            Some(n) => n.to_string(),
+            None => continue,
+        };
+        if !name.starts_with("SaveGames") || !path.is_dir() {
+            continue;
+        }
+        // The newest .sav *inside* it: a folder's own mtime changes when any file is added or removed, which
+        // includes a co-op write landing there - so using it would let this module's own output reorder the
+        // candidates. The saves' mtimes are the engine's.
+        let newest = std::fs::read_dir(&path)
+            .ok()
+            .into_iter()
+            .flatten()
+            .flatten()
+            .filter(|f| f.path().extension().and_then(|x| x.to_str()) == Some("sav"))
+            .filter_map(|f| f.metadata().ok().and_then(|m| m.modified().ok()))
+            .max();
+
+        let Some(stamp) = newest else { continue };
+        let better = match &best {
+            None => true,
+            Some((t, n)) => {
+                // Strictly newer wins; on an exact tie prefer plain `SaveGames`, then the shorter name, so the
+                // result is stable rather than dependent on iteration order.
+                stamp > *t || (stamp == *t && tie_break(&name) < tie_break(n))
+            }
+        };
+        if better {
+            best = Some((stamp, name));
+        }
+    }
+
+    match best {
+        Some((_, name)) => saved.join(name).to_string_lossy().into_owned(),
+        None => fallback.to_string_lossy().into_owned(),
+    }
+}
+
+/// `SaveGames` sorts before `SaveGames2`, which sorts before `SaveGames10` - string order would put `10` first.
+fn tie_break(name: &str) -> (u8, u32) {
+    if name == "SaveGames" {
+        return (0, 0);
+    }
+    let suffix = &name["SaveGames".len()..];
+    (1, suffix.parse::<u32>().unwrap_or(u32::MAX))
 }
 
 /// Keeps the newest snapshot on disk so another tool - and a human - can inspect what the client
@@ -1474,8 +1552,7 @@ mod guard_tests {
         assert!(f.failed(), "and the limit must still be reachable afterwards");
     }
 
-    /// Unframeable bytes must be reported as an error, not as an empty frame.
-    ///
+    /// Unframeable bytes must be reported as an error, not as an empty frame.    ///
     /// The old splitter returned `Some(vec![])` for a corrupt header, and the reader's `drain(..0)` removed
     /// nothing - so the buffer was never dropped even though the comment said dropping was the only recovery.
     /// Every later call then failed on the same header. That was masked while an oversized length merely
@@ -1501,5 +1578,68 @@ mod guard_tests {
         let whole = coop_proto::encode(&coop_proto::Msg::Bye);
         assert!(matches!(split_frame(&whole[..whole.len() - 1]), Ok(None)));
         assert!(matches!(split_frame(&whole), Ok(Some(_))));
+    }
+
+    /// Which `SaveGames*` folder is live decides where a received save is written.
+    ///
+    /// The game keeps several - one per profile - and this machine has `SaveGames`, `SaveGames2`, `SaveGames4`
+    /// and `SaveGamesS`. Writing to a fixed `SaveGames` means a client on another profile receives a fully
+    /// transferred, hash-verified save into a folder the game never reads, and reports success. The symptom
+    /// ("the save arrived but LoadGame cannot find it") points at the transfer, not at the path.
+    #[test]
+    fn the_live_save_folder_is_the_one_the_engine_writes_to() {
+        use std::fs;
+        let root = std::env::temp_dir().join(format!("coop_savedir_{}", std::process::id()));
+        let _ = fs::remove_dir_all(&root);
+        for (d, files) in [("SaveGames", &["autosave.sav"][..]),
+                           ("SaveGames2", &["autosave.sav"][..]),
+                           ("SaveGames4", &["autosave.sav"][..])] {
+            fs::create_dir_all(root.join(d)).unwrap();
+            for f in files {
+                fs::write(root.join(d).join(f), b"x").unwrap();
+            }
+        }
+
+        // Make SaveGames4 the most recently written, as the engine does for the profile in use.
+        let later = std::time::SystemTime::now() + std::time::Duration::from_secs(60);
+        fs::File::options()
+            .write(true)
+            .open(root.join("SaveGames4").join("autosave.sav"))
+            .unwrap()
+            .set_modified(later)
+            .unwrap();
+
+        let picked = live_save_dir(&root);
+        assert!(
+            picked.ends_with("SaveGames4"),
+            "the newest folder must win, because that is the profile the engine is writing; got {picked}"
+        );
+
+        // A folder with no .sav in it is not a candidate - it has never held a career.
+        fs::create_dir_all(root.join("SaveGames9")).unwrap();
+        let later_still = std::time::SystemTime::now() + std::time::Duration::from_secs(120);
+        fs::File::options()
+            .write(true)
+            .open(root.join("SaveGames2").join("autosave.sav"))
+            .unwrap()
+            .set_modified(later_still)
+            .unwrap();
+        assert!(live_save_dir(&root).ends_with("SaveGames2"));
+
+        // With nothing to choose from, the plain name is returned so a later write fails with a real path.
+        let empty = std::env::temp_dir().join(format!("coop_savedir_empty_{}", std::process::id()));
+        fs::create_dir_all(&empty).unwrap();
+        assert!(live_save_dir(&empty).ends_with("SaveGames"));
+
+        let _ = fs::remove_dir_all(&root);
+        let _ = fs::remove_dir_all(&empty);
+    }
+
+    #[test]
+    fn save_folder_names_sort_numerically_not_as_strings() {
+        // SaveGames < SaveGames2 < SaveGames10; string order would put 10 first and pick the wrong profile.
+        assert!(tie_break("SaveGames") < tie_break("SaveGames2"));
+        assert!(tie_break("SaveGames2") < tie_break("SaveGames10"));
+        assert!(tie_break("SaveGames10") < tie_break("SaveGamesS"));
     }
 }

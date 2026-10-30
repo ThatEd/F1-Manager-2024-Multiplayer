@@ -342,24 +342,24 @@ plus: autosave.sav, customisation.sav, player.sav
 decoded by the engine as "one of a fixed 30" — it is mapped to a filename over a wider range, and one of the
 non-numeric names (`customisation`) has no DataStore context at all.
 
-**Why this matters for co-op, concretely.** The bridge already uses `LoadGame <slot>` as its proven path to load
-a chosen save. Two consequences:
+**Correction to my first reading of this.** I initially concluded a co-op session should therefore use an
+*observed* name, because an invented one might never be loadable. That was too cautious, and the other profile
+folders show why: `SaveGames4` holds `cardemir.sav`, `F2CC.sav`, `BTG_24.sav`, `BTG_PreSeason.sav` - user-chosen
+names with no relation to `save<N>`. **The file layer accepts arbitrary names**, so naming a co-op transfer
+something of its own is fine.
 
-1. Writing a save under a *made-up* `slotName` such as `coop_session` is **not** known to work: the engine has
-   to map the string to a file, and every observed mapping is `save<N>`, `autosave`, `customisation` or
-   `player`. A name it does not recognise could be ignored, or could create a file that the save/load screen
-   never lists. **unknown** either way - and the honest thing is to use an observed name rather than invent one.
-2. Conversely, `LoadGame` accepts context ids the UI palette does not show (`save165` has a file but no
-   DataStore slot), so the receiving side's ability to load a specific file is broader than "30 slots" suggests.
+The real constraint is the other direction, and it is the one that bites: the name has to be **visible to the
+save/load screen and loadable via `LoadGame`**, which reads `slotName` from a DataStore context the UI declares.
+Only the 30 declared contexts are in that palette. So `coop_session.sav` may sit correctly in the folder and
+still not be reachable through the UI's own load path - unless the name matches a declared context, or the
+save/load screen enumerates the directory rather than a fixed list (which those odd names hint it might).
+**unknown**, and cheap to settle live.
 
-**Correction for the design:** when the client receives a session payload, name it after an **observed** slot
-convention (`save<N>` with `N` chosen to be free, or overwrite `autosave`), and drive the load with the matching
-`slotName`. Do not assume a 30-name ceiling, and do not assume an arbitrary string maps to a file.
+**Recommendation unchanged in effect:** write the transfer under an observed, declared name (`save<N>` for a
+free N, or overwrite `autosave`), because that is proven to load. Anything else is a hypothesis.
 
-**Also verified here:** the received save does land where the game reads it. `coop-link`'s `session_dir()`
-resolves `%LOCALAPPDATA%\F1Manager24\Saved\SaveGames` - the same directory the game and the save/load screen use -
-and the transfer is hash-checked before the write (`main.rs:1251-1267`). So the *transport* is correct; only the
-naming assumption was shaky.
+**Also verified here, and a separate bug:** the received save does land in a `SaveGames*` folder, but *which* one
+was hardcoded - see §19. The transfer itself is hash-checked before the write (`main.rs:1251-1267`).
 
 ---
 
@@ -618,6 +618,46 @@ wrong place to look for it, and the exe says which two names to try.
 
 ---
 
+## 19. `coop-link` wrote received saves to a hardcoded folder, and the game keeps several
+
+Chasing the slot-naming question turned up something with more bite. The game keeps a **set** of save folders,
+one per profile. This machine has four:
+
+```
+SaveGames    files= 23  newest=2026-10-30 05:24:26   <- live: the engine autosaved here today
+SaveGames2   files= 52  newest=2026-10-21 11:46:03
+SaveGames4   files= 44  newest=2026-08-26 17:25:20
+SaveGamesS   files= 28  newest=2026-10-21 12:44:35
+```
+
+`coop-link`'s `session_dir()` returned `...\F1Manager24\Saved\SaveGames` unconditionally. On *this* machine that
+is correct - which is exactly why the bug would not have shown up here. On a client whose profile resolves to any
+other suffix, the transfer would complete, pass its hash check, print `session saved to <path>`, and land in a
+folder the game never reads. The success report is what makes it bad: the operator sees it work, and the next
+step (`LoadGame`) simply cannot find the file, which points at the transfer rather than at the path.
+
+Fixed by choosing the folder the way "live for this account" actually behaves: **the one whose newest `.sav` is
+newest**, because the engine rewrites its own saves in the folder it is using while the other profiles sit
+unchanged. Details that matter:
+
+* Compare `.sav` mtimes, not the folder's - a folder's mtime changes when *we* write into it, so using it would
+  let this module's own output reorder its candidates on the next call.
+* A `SaveGames*` folder with no `.sav` is not a candidate: it has never held a career.
+* Ties break deterministically (`SaveGames` first, then numeric suffix), so the result never depends on
+  enumeration order, and `SaveGames10` sorts after `SaveGames2` rather than before it.
+* With nothing to choose from it returns `SaveGames` anyway, so a later write fails with a real path in the
+  message instead of silently using `.`.
+* `COOP_SAVE_DIR` still wins when set - an explicit override should always beat inference.
+
+Tested on a synthetic three-folder layout (newest wins, an empty folder is skipped, the empty case falls back)
+and against the real machine, where the rule correctly picks `SaveGames`.
+
+**Still unknown:** how the game itself decides. This infers from mtimes because the engine's selector has not been
+reverse-engineered, and it would break if two profiles were both recently active. Said plainly rather than
+papered over - and the one-launch check is to see which folder gains an autosave while the client plays.
+
+---
+
 ## Summary of what this audit changed
 
 | finding | severity | state |
@@ -633,6 +673,7 @@ wrong place to look for it, and the exe says which two names to try.
 | **a declared frame length was trusted without limit** | medium - memory exhaustion reachable from the other machine (`coop-link` had no buffer cap) | **fixed**: `MAX_FRAME` refuses it as an error, so callers resync instead of accumulating |
 | **the resync path never resynced**: `split_frame` returned an empty frame that `drain(..0)` removed nothing of | medium - a corrupt header poisoned the stream forever; with the length cap it would have become a hot loop | **fixed**: `split_frame` returns `Result`, the reader clears and reports the drop |
 | a live-server test had a fixed 12 s deadline that starved under load | low - but a red result that may be noise trains people to ignore red | **fixed**: 60 s, overridable, fails fast if the server exits, and prints its output |
+| **`coop-link` wrote received saves to a hardcoded `SaveGames`**, while the game keeps one folder per profile | **high on another machine** - the transfer reports success and the save lands where the game never looks | **fixed**: picks the folder whose newest `.sav` is newest; tested on a synthetic layout and against the real one |
 | `Mailbox::drain` indexed the shared buffer directly on the game thread | low (unreachable today) but the failure mode is the whole process | **fixed**: `get(..)` with a zero-entry fallback |
 | save "opaque / unreadable" was imprecise: container is Unreal's, payload is compressed | low | corrected in this document and in `tools/save_format.py` |
 | `SIMULATE_RVA` still points at the right function in the installed exe | - | **verified statically**: file bytes at the RVA match the live-read prologue exactly (`tools/verify_offsets.py`) |
