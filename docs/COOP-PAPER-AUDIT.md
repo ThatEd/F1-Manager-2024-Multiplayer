@@ -357,6 +357,38 @@ naming assumption was shaky.
 
 ---
 
+## 12. A protocol version mismatch was reported as an unreadable frame
+
+`Msg::TeamClaim` moved `VERSION` from 2 to 3 (`coop-proto/src/lib.rs:37`). The check itself is strict and
+correct - `decode` refuses anything that is not exactly this version (`:659`), before it trusts the length or
+the checksum - and the error even carries the reasoning: `ProtoError::BadVersion(v)` displays as
+`peer speaks version 2, this build speaks 3` (`:354`).
+
+The agent then threw that away one line before the user saw it (`coop-agent/src/lib.rs:214`, before the fix):
+
+```rust
+Err(_)     => "unreadable frame from supervisor".to_string(),
+```
+
+So a peer running an older build - the **ordinary** case, because the two machines are updated separately and
+this session already shipped a version bump - produced the same message a random corrupt packet produces. That
+is the same failure class as the Steam-invite bug fixed earlier: the specific reason existed, was correct, and
+was discarded at the last step, so the user had nothing to act on. Worse here, because "unreadable frame"
+points at the network while the real cause is a build mismatch.
+
+Fixed: `BadVersion` is now named, with the peer's version and the action to take. A frame that is genuinely not
+ours still says "unreadable" and still carries its reason, because removing that would be solving the wrong
+problem. Two tests pin both halves; planting the old arm back makes the first one fail.
+
+**A verification mistake worth recording.** My first attempt to prove the test could fail reported it *passing*
+with the regression planted. The plant had silently done nothing: `.NET` file APIs ignore PowerShell's working
+directory, so `[IO.File]::ReadAllText('crates\...')` resolved against the process CWD and **failed**, and the
+subsequent write went to the wrong place. Had I trusted that output, I would have shipped a test I believed was
+checked and never was - the exact "claims proven that were not" failure this audit exists to prevent. Re-done
+with absolute paths, the test fails without the fix and passes with it.
+
+---
+
 ## Summary of what this audit changed
 
 | finding | severity | state |
@@ -365,6 +397,7 @@ naming assumption was shaky.
 | `coop-auth` is complete and never called, while comments claim it enforces team rules | **medium** - nothing broken today, but the guarantee was absent | **fixed**: gated at both write chokepoints (`LiveDb::sql`, `LiveDb::write_car`), with wiring tests |
 | **team retarget's "edit then reload" loses the edit**: `LoadGame` re-reads from disk, and nothing persists a runtime `UPDATE` | **high** - the recommended Versus implementation cannot work as written | recorded; the fix is a persistence step, and the first experiment is specified in §10 |
 | **the documented 30-name save-slot space is not the file space** (`save165`–`save168` and `customisation.sav` exist outside it) | **medium** - a co-op session named with an invented `slotName` may never be loadable | recorded in §11; the design should use an observed slot name |
+| **a protocol version mismatch was reported as "unreadable frame"**, discarding the reason that identifies it | **medium** - the ordinary failure after an update, misdiagnosed as a network problem | **fixed**: `BadVersion` is named with the peer version and the action; both halves tested |
 | `Mailbox::drain` indexed the shared buffer directly on the game thread | low (unreachable today) but the failure mode is the whole process | **fixed**: `get(..)` with a zero-entry fallback |
 | save "opaque / unreadable" was imprecise: container is Unreal's, payload is compressed | low | corrected in this document and in `tools/save_format.py` |
 | `SIMULATE_RVA` still points at the right function in the installed exe | - | **verified statically**: file bytes at the RVA match the live-read prologue exactly (`tools/verify_offsets.py`) |

@@ -168,6 +168,21 @@ fn clock_with<T>(f: impl FnOnce(&mut clocksync::ClockSync) -> T) -> T {
 /// Only the frames that carry a decision are described; anything else is named rather than dumped, so a
 /// future message type cannot turn the log into binary noise.
 fn note_inbound(frame: &[u8]) {
+    let line = describe_inbound(frame);
+    let mut q = match inbox().lock() {
+        Ok(q) => q,
+        Err(p) => p.into_inner(),
+    };
+    while q.len() >= INBOX_CAP {
+        q.pop_front();
+    }
+    q.push_back(line);
+}
+
+/// The line [`note_inbound`] records, split out so it can be asserted without touching the process-wide
+/// inbox. A wrong message here is invisible until a session fails, which is exactly what happened with the
+/// version mismatch below.
+fn describe_inbound(frame: &[u8]) -> String {
     let line = match coop_proto::decode(frame) {
         Ok(Msg::Bye) => "refused by supervisor (see its log for the reason)".to_string(),
         Ok(Msg::Vote { proposal, option }) => {
@@ -211,16 +226,15 @@ fn note_inbound(frame: &[u8]) {
             }
         }
         Ok(other) => format!("{other:?}"),
-        Err(_) => "unreadable frame from supervisor".to_string(),
+        // A version mismatch is the single most likely reason a co-op session fails to start after an
+        // update, and it used to be reported as "unreadable frame" - the same line a random corrupt packet
+        // produces. That is the failure class that hid the Steam-invite bug for a whole session: the
+        // specific reason existed (ProtoError's Display already says "peer speaks version 2, this build
+        // speaks 3") and was thrown away one line before it reached the user.
+        Err(e @ coop_proto::ProtoError::BadVersion(_)) => format!("{e} - update both machines to the same build"),
+        Err(e) => format!("unreadable frame from supervisor: {e}"),
     };
-    let mut q = match inbox().lock() {
-        Ok(q) => q,
-        Err(p) => p.into_inner(),
-    };
-    while q.len() >= INBOX_CAP {
-        q.pop_front();
-    }
-    q.push_back(line);
+    line
 }
 
 fn inbox_lines() -> Vec<String> {
@@ -2603,5 +2617,46 @@ mod tests {
     fn a_fresh_hook_has_no_callback() {
         assert_eq!(hook::callback(), 0, "an uninstalled hook reports no callback");
         assert_eq!(hook::fires(), 0, "an uninstalled hook has not fired");
+    }
+
+    /// A peer on a different protocol version must be *named*, not described as an unreadable frame.
+    ///
+    /// This is not cosmetic. `VERSION` moved 2 -> 3 when `Msg::TeamClaim` was added, and the two machines
+    /// are updated separately - so a stale build on one side is the ordinary case, not an exotic one. The
+    /// old fallback threw the reason away and printed the same string a corrupt packet produces, leaving
+    /// nothing to act on. The reason is carried by `ProtoError`'s own `Display`, so the test asserts the
+    /// version number and the advice reach the user, and that the useless phrasing does not return.
+    #[test]
+    fn a_version_mismatch_is_reported_with_the_version_not_as_garbage() {
+        // Build a frame header that decodes as a valid magic but the wrong version. That is exactly what a
+        // peer running an older build sends, and it fails before the body is looked at.
+        let mut frame = Vec::new();
+        frame.extend_from_slice(&coop_proto::MAGIC);
+        frame.extend_from_slice(&(coop_proto::VERSION.wrapping_sub(1)).to_le_bytes());
+        frame.extend_from_slice(&0u32.to_le_bytes());
+        frame.extend_from_slice(&0u32.to_le_bytes());
+
+        let line = describe_inbound(&frame);
+        assert!(
+            line.contains("version"),
+            "the user must be told this is a version problem, got {line:?}"
+        );
+        assert!(
+            line.contains(&coop_proto::VERSION.wrapping_sub(1).to_string()),
+            "the peer's version must be named so the mismatch is obvious, got {line:?}"
+        );
+        assert!(
+            !line.contains("unreadable"),
+            "a version mismatch is readable and known; calling it unreadable is what hid the cause, got {line:?}"
+        );
+    }
+
+    /// A frame that is genuinely not ours must still be reported as unreadable, and must not panic. Without
+    /// this the fix above could be "solved" by claiming every bad frame is a version mismatch.
+    #[test]
+    fn a_corrupt_frame_is_still_called_unreadable() {
+        let line = describe_inbound(&[0u8; 4]);
+        assert!(line.contains("unreadable"), "got {line:?}");
+        assert!(!line.contains("update both machines"), "got {line:?}");
     }
 }
