@@ -1595,6 +1595,30 @@ pub fn log(line: &str) {
 
 /// Worker loop. Connects, identifies itself, heartbeats, and reconnects if the supervisor restarts.
 pub fn run(pid: u32, supervisor: &str) {
+    // A panic in a thread aborts the *whole* process, because the workspace builds with `panic = "abort"`. In a
+    // DLL inside someone's game that means a mod bug takes the game down with no explanation, and the only
+    // evidence is an `0xc0000409` in the Windows log naming `ucrtbase.dll` rather than anything of ours. So the
+    // panic hook writes what it can to our log first: a named failure instead of a silent kill.
+    //
+    // Installed here rather than in `DllMain`: this runs on the worker thread, outside the loader lock, which is
+    // where allocating and writing a file is legal.
+    std::panic::set_hook(Box::new(|info| {
+        let where_ = info
+            .location()
+            .map(|l| format!("{}:{}", l.file(), l.line()))
+            .unwrap_or_else(|| "unknown location".to_string());
+        let what = if let Some(s) = info.payload().downcast_ref::<&str>() {
+            (*s).to_string()
+        } else if let Some(s) = info.payload().downcast_ref::<String>() {
+            s.clone()
+        } else {
+            "non-string panic payload".to_string()
+        };
+        log(&format!("PANIC at {where_}: {what}"));
+        #[cfg(windows)]
+        crash::note(&format!("PANIC at {where_}: {what}"));
+        // No unwinding is possible with `panic = "abort"`; naming it is the whole objective.
+    }));
     log(&format!("agent started in pid {pid}, supervisor {supervisor}"));
     #[cfg(windows)]
     {

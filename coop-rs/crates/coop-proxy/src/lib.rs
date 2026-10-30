@@ -73,6 +73,13 @@ mod win {
         pub fn GetModuleHandleA(name: *const u8) -> isize;
         pub fn GetModuleHandleExA(flags: u32, addr: *const u8, out: *mut isize) -> i32;
         pub fn GetModuleFileNameA(module: isize, out: *mut u8, size: u32) -> u32;
+        pub fn CreateThread(
+            attrs: *mut c_void,
+            stack: usize,
+            start: extern "system" fn(*mut u8) -> u32,            param: *mut u8,
+            flags: u32,
+            id: *mut u32,
+        ) -> isize;
     }
 
     #[link(name = "user32")]
@@ -146,17 +153,39 @@ fn note(line: &str) {
     }
 }
 
-/// Resolves the real `version.dll` and loads the agent. Called exactly once, from `DllMain`.
+/// Resolves the real `version.dll` and loads the agent — **off the loader lock**, on our own thread.
+///
+/// This used to run directly inside `DllMain`, and that was the bug that stopped the game launching. Microsoft's
+/// own guidance for `DllMain` is unambiguous: *"You should never perform the following tasks from within
+/// DllMain: Call LoadLibrary or LoadLibraryEx (either directly or indirectly). This can cause a deadlock or a
+/// crash."* Loading a DLL while the loader lock is held leaves the new image half-wired, and the fault was
+/// exactly that shape - deterministic, six identical launches, `0xc0000409` in `ucrtbase.dll`, with the agent's
+/// own log showing it had started and then stopping dead.
+///
+/// So `DllMain` now does only what is legal there - report, and create a thread - and the thread does the work.
+/// `CreateThread` from `DllMain` is one of the few operations that is documented as safe.
 fn install() {
     static ONCE: OnceLock<()> = OnceLock::new();
-    ONCE.get_or_init(|| unsafe {
+    // Created here, resolved on the thread. `OnceLock` guarantees a single thread even if the loader calls
+    // `DllMain` again for a thread attach.
+    if ONCE.set(()).is_err() {
+        return;
+    }
+    unsafe {
+        win::CreateThread(std::ptr::null_mut(), 0, worker, std::ptr::null_mut(), 0, std::ptr::null_mut());
+    }
+}
+
+/// The real work. Runs on a thread we own, with no loader lock held.
+extern "system" fn worker(_param: *mut u8) -> u32 {
+    unsafe {
         // `GetModuleHandleA` rather than `LoadLibraryA`: the real version.dll is already loaded in every
         // process (Windows itself pulls it in), so asking for the handle cannot recurse back into this file.
         // `LoadLibraryA("version.dll")` here could - the loader might resolve the name to us again.
         let real = win::GetModuleHandleA(cstr("version.dll").as_ptr());
         if real == 0 {
             note("coop_proxy: the real version.dll is not loaded; forwarding will fail");
-            return;
+            return 0;
         }
         note(&format!("coop_proxy: version.dll loaded (real module 0x{real:X})"));
 
@@ -169,7 +198,7 @@ fn install() {
             note(&format!(
                 "coop_proxy: {ENABLE_MARKER} not present - forwarding only, agent not loaded"
             ));
-            return;
+            return 0;
         }
 
         let agent = win::LoadLibraryA(cstr(AGENT).as_ptr());
@@ -183,7 +212,8 @@ fn install() {
         } else {
             note(&format!("coop_proxy: loaded {AGENT} (module 0x{agent:X})"));
         }
-    });
+    }
+    0
 }
 
 /// The real functions, resolved once.
