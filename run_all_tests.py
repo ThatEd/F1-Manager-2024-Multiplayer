@@ -173,6 +173,12 @@ if shutil.which("node"):
     suite("gaps", [sys.executable, "-I", os.path.join(TOOLS, "ui_event_gap.py")],
           HERE, lambda out: ("IN THE ENGINE, NEVER SENT BY THE UI" in out and "StageProceed" in out)
           or out.strip().startswith("SKIP"))
+
+    # How many events does the UI actually have? The README and CAREER-COOP-PLAN.md both quote a count as
+    # evidence, and both were wrong (352/517 vs the measured 346/373). Measuring it here means the number in
+    # the docs is checkable rather than copied from prose.
+    suite("surface", [sys.executable, "-I", os.path.join(TOOLS, "event_surface.py")],
+          HERE, lambda out: "OK: measured surface matches" in out or out.strip().startswith("SKIP"))
     # One player must not be able to take every team. Reported as "player 1 being able to take every team and
     # locking them", caused by comparing a string object key against a number - always unequal, so no claim
     # was ever released. This extracts and runs the real `pickTeam` body, so a copy cannot drift from the source.

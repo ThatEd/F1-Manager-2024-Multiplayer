@@ -719,6 +719,36 @@ type, no `sqlite3_exec` capture hook, and no conflict resolution. `LiveDb::sql` 
 mod composing its own SQL and pushing it through `sqlite3_exec` in the target - which is the opposite direction:
 it sends statements *we* wrote, not statements *the game* wrote.
 
+### How big the gap is, in one number
+
+The engine's 346 distinct UI event names include a large batch of management verbs (`OnSubmitContractOffer`,
+`DesignStageChanged`, `ManufactureStageChanged`, `Sponsor*`, `Parts*`, `EditStaff*`, ...). `observe.js` wraps
+`engine.trigger`, so it *sees* every one of them, and then does this (`observe.js:30-36`):
+
+> ```
+> *   SimPauseChange(value, pauseLayer)
+> *   OnSubmitContractOffer(terms, staffID)
+> *   OnConfirmStaffContract(staffID)
+> *   OnCancelStaffContract(staffID)
+> *   OnFailedStaffContract(staffID)
+> * Anything not in that list is observed and ignored.
+> ```
+
+Six events: one clock, four contract-arbitration, one vote. **No management verb is replicated.** That is a
+deliberate choice recorded in the file, not an oversight, which is why it needs a decision rather than a patch.
+
+> **A number in the design docs to distrust.** `CAREER-COOP-PLAN.md:154` says the game emits "267 career verbs",
+> and the README said "352 events across 517 call sites". Neither reproduces. Measuring the export
+> (`tools/event_surface.py`) gives **346 distinct event names and 373 call sites** across both call forms; the
+> inline form alone is 103 names / 133 sites. The README is corrected; the 267 figure is still in
+> `CAREER-COOP-PLAN.md` and should be re-derived before anyone sizes work from it. The conclusion here does not
+> depend on it: whether there are 103, 267 or 346, **zero management verbs are replicated**.
+
+It also means the missing layer has a producer but not a sufficient one: the wrapper can see that a player
+pressed a career verb, but turning `DesignStageChanged` into the row the game will write is not something the UI
+can tell you - the write happens inside the engine's SQLite. So statement replication needs a capture on the
+engine's own prepare/bind path, exactly as `CAREER-COOP-PLAN.md` §4.3 assumes, and not merely a wider event list.
+
 ### The two modes in the UI, judged against that
 
 `lobby.js:355-361` offers exactly two:

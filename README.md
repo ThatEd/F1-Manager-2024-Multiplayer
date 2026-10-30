@@ -15,7 +15,7 @@ launched with this code. Everything below reflects what has been *run*, not what
 
 | Area | State | Evidence |
 |---|---|---|
-| UI command surface | **Mapped.** 352 events across 517 call sites; `engine.trigger` proven to be the single choke point | [docs/UI-COMMANDS.md](docs/UI-COMMANDS.md) |
+| UI command surface | **Mapped.** 346 distinct event names across 373 `sendEvent` call sites (measured, not copied: `python -I tools/event_surface.py`); `engine.trigger` proven to be the single choke point | [docs/UI-COMMANDS.md](docs/UI-COMMANDS.md) |
 | Driving the UI from outside | **Works.** Pressing real controls emits the real events; `Continue` and `Load` proven live in-game on the host machine | [docs/CLIENT-UI-PRESS.md](docs/CLIENT-UI-PRESS.md) |
 | Starting a race session | **Not solved, but the lever is verified.** The *UI layer* has no event that starts a sim — the pre-session confirm emits only `PreSessionClosed`. The exe's native event-name table contains two names the UI never sends: **`StageProceed`** (`0x5fa7c98`) and `TravelToRaceWeekend` (`0x5fcac28`). Confirmed against the exe: the five names beside them that the UI *does* send appear 1–7 times in the Gameface JS, while these two appear **zero** times. Untried | [docs/COOP-PAPER-AUDIT.md](docs/COOP-PAPER-AUDIT.md) |
 | Car state replication | **Code complete, unrun.** Protocol, layout, mailbox and hook all tested; the hook has never fired in a live race | [docs/RACESIM-HIJACK.md](docs/RACESIM-HIJACK.md) |
