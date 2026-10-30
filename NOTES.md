@@ -3416,3 +3416,61 @@ with it OFF the game launches. The thing to establish is *which* part of agent s
 agent from the proxy but with its own sub-systems gated one at a time (presence off, then Steam join-listener
 off, then hook install off), each with the switch as the way back. That is four launches with a guaranteed-safe
 position before each, which is the only honest way to narrow it.
+
+### 2026-10-30 - Root cause of the launch failure: LoadLibrary inside DllMain
+
+Windows recorded six crashes, all identical:
+
+```
+Faulting application name: F1Manager24.exe, version 1.11.0.39891
+Faulting module name: ucrtbase.dll
+Exception code: 0xc0000409
+Fault offset: 0x00000000000a527e          <- the same address every time
+```
+
+The same fault offset on every attempt is a code bug, not a race. And `0xc0000409` is
+`STATUS_STACK_BUFFER_OVERRUN`, which is also what `__fastfail` and `abort()` raise - so this was a deliberate
+abort, in the CRT, deterministic.
+
+**The bug was `LoadLibraryA` called from `DllMain`.** Microsoft's guidance for DllMain lists it under tasks you
+must never perform: *"Call LoadLibrary or LoadLibraryEx (either directly or indirectly). This can cause a
+deadlock or a crash."* Loading a module while the loader lock is held leaves the new image half-initialised, and
+the agent's own log then showed exactly that shape - `agent started`, `hook installed`, the two listeners, and
+then nothing, because the agent did run and the process died underneath it.
+
+This is also the precise difference between the path that worked and the one that did not: the old route
+injected into an already-running game, so its `LoadLibrary` ran with **no loader lock held**. Nothing about the
+agent, the hook, or Steam presence had to be the culprit, which is why gating those would have been guesswork.
+
+**Fixed:** `DllMain` now does only what is legal there - `CreateThread`, which is documented as safe - and the
+resolving and loading happen on that thread. The switch semantics are unchanged.
+
+**Second fix, because the first failure was invisible:** `run()` installs a panic hook that writes the location
+and message to `coop_agent.log` before aborting. A panic in a thread aborts the whole process when built with
+`panic = "abort"` (which this workspace is), so a mod bug used to take the game down with the only evidence being
+a `ucrtbase.dll` line that mentions nothing of ours. Now the next such failure names itself.
+
+### Recovery is a double-click, not a command
+
+`coop-disable.cmd` and `coop-enable.cmd` sit beside `F1Manager24.exe`. `coop-disable.cmd` removes the one marker
+that loads the agent and renames the DLL aside; `version.dll` stays put as a pure forwarder, which is proven not
+to affect launch. Exercised for real, not just written: running it took the install from
+`switch=True agent=True` to `switch=False agent=False`, and `coop-enable.cmd` put it back.
+
+### `tools/launch_verdict.py`
+
+Answers "did the agent load and did the game survive?" from the two logs plus the Windows crash record, so the
+answer does not depend on reading four files by hand. Read-only; it never launches anything. Its branching is
+tested against synthetic logs for four cases - crashed after start, forwarder only, live with the hook firing,
+and a panic - and one ordering bug was found that way: it reported a *live* agent as crashed because crash
+records from earlier attempts were still in the window. A live agent now wins, since it proves the process
+survived. (That same shape - a stale log producing a confident wrong answer - has now bitten this project three
+times.)
+
+### Where it stands
+
+Both machines are armed for one test launch: `version.dll` 122,368 (fixed, loads off the loader lock),
+`coop_proxy.enable` present, `coop_agent.dll` present. **Not yet launched** - that is the owner's call, and the
+whole point of this note is that the previous attempt was armed on a guess. What is now different is that the
+guess has a documented mechanism behind it, and the first thing to read after launching is
+`python tools/launch_verdict.py`.
