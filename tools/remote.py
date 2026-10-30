@@ -607,8 +607,24 @@ def cmd_deploy_link():
         return got
 
     push('coop-link.exe')
-    push('coop_agent.dll')
+    agent_hash = push('coop_agent.dll')
     push('coop-inject.exe')
+
+    # Record what was actually deployed, on both machines.
+    #
+    # This is what makes "is the install current?" answerable. The agent build is not byte-reproducible (the
+    # same sources gave three different hashes across consecutive builds in one session), so comparing an
+    # install against whatever `cargo build` last left in the target directory can report STALE for a perfectly
+    # correct deployment - and rebuilding is not deploying. The recorded hash is the only thing that means
+    # "this is the copy we pushed".
+    for label, bin_dir in (('host', HOST_BIN), ('client', SHARE + GAME_BIN)):
+        record = os.path.join(bin_dir, 'coop_agent.deployed.txt')
+        try:
+            with open(record, 'w', encoding='utf-8') as f:
+                f.write('%s deployed %s\n' % (agent_hash, time.strftime('%Y-%m-%d %H:%M:%S')))
+            print('%-16s recorded deployed hash %s' % (label, agent_hash[:16]))
+        except OSError as e:
+            print('%-16s could not record deployed hash: %s' % (label, e))
 
     # Write the side file as part of the deploy, on both machines.
     #

@@ -1,4 +1,4 @@
-﻿"""Pre-flight gate for a synced race. Refuses to say READY unless the whole chain is live.
+"""Pre-flight gate for a synced race. Refuses to say READY unless the whole chain is live.
 
 Why this exists
 ---------------
@@ -268,6 +268,21 @@ def listening(port, local_only=True):
         return None
 
 
+def read_deployed_agent():
+    """The SHA-256 that `deploy-link` recorded for the agent it pushed, or None.
+
+    Written next to the host's binaries by `remote.py deploy-link`. Recording the deployed hash is what makes
+    "is this install current?" answerable at all, given the agent build is not reproducible.
+    """
+    path = os.path.join(HOST_BIN, 'coop_agent.deployed.txt')
+    try:
+        with open(path, 'r', encoding='utf-8') as f:
+            line = f.readline().strip().split()
+        return line[0] if line else None
+    except OSError:
+        return None
+
+
 def file_hash(path):
     """Full SHA-256, for comparing an installed *binary* against the built one."""
     try:
@@ -318,14 +333,16 @@ def read_side(bin_dir):
 def built_agent():
     """Hash and size of the agent this tree builds, or (None, None) if it has not been built.
 
-    The agent size used to be hard-coded here (305152) and went stale the moment the agent gained code, which
-    made every preflight fail on a check that was really about "did the build happen". Comparing against the
-    artefact is the check that was actually meant.
+    **Deliberately no longer used by the gate.** It is kept only so an operator can ask "what would a deploy
+    push right now", and its history is the reason the gate changed: the check it powered compared an install
+    against the target directory, and that check failed twice for reasons that had nothing to do with a bad
+    deployment. Once because the size was hard-coded (305152), and once because the agent build is not
+    byte-reproducible, so a rebuild that was never deployed looked like a stale install. `deploy-link` now
+    records the hash it actually pushed and `read_deployed_agent` compares against that.
 
-    Order matters and got this wrong once: the workspace pins its output via `.cargo/config.toml`
-    (`target-dir = E:/TEMP/coop-target`), so an *in-tree* `target/release` is a stale leftover from an older
-    build. Preferring it made the gate compare a two-month-old binary against the install and fail a machine
-    that was correctly deployed. The pinned location is therefore asked for first.
+    Order matters: the workspace pins its output via `.cargo/config.toml` (`target-dir = E:/TEMP/coop-target`),
+    so an *in-tree* `target/release` is a stale leftover. Preferring it made the gate compare a two-month-old
+    binary against the install.
     """
     here = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
     candidates = [
@@ -440,17 +457,24 @@ def main():
           'no hook stub found - inject coop_agent.dll')
     c.add(bool(cb), 'host hook callback registered', ('0x%X' % cb) if cb else 'callback is null')
 
-    # The agent that is *installed* must match the agent this tree builds. Asking "is it 305152 bytes" was a
-    # build-staleness check in disguise and broke the moment the agent grew; comparing hashes says what was
-    # meant. If the tree has not been built, that is a named failure rather than a size mismatch nobody can act on.
-    want_hash, want_size = built_agent()
+    # The agent that is *installed* must be the one that was **deployed**, not whatever `cargo build` last left
+    # in the target directory.
+    #
+    # Two separate lessons meet here. The agent build is not reproducible - the same sources produced 511,488
+    # bytes with three different hashes across consecutive builds in one session - so "does the install match
+    # the tree" can answer no for a perfectly correct deployment. And rebuilding is not deploying: a snapshot
+    # that `deploy-link` pushed stays valid when someone later rebuilds.
+    #
+    # `deploy-link` therefore records the hash it pushed (`coop_agent.deployed.txt`) and this compares the
+    # install against that record. A missing record is a named failure, not a silent pass.
     h_dll, h_size = sha16(os.path.join(HOST_BIN, 'coop_agent.dll'))
-    if want_hash is None:
-        c.pending(False, 'agent build available',
-                  'no coop_agent.dll in the tree - run cargo build --release -p coop-agent')
+    deployed = read_deployed_agent()
+    if not deployed:
+        c.pending(False, 'deployed agent hash recorded',
+                  'no coop_agent.deployed.txt - run tools/remote.py deploy-link')
     else:
-        c.add(h_dll is not None and file_hash(os.path.join(HOST_BIN, 'coop_agent.dll')) == want_hash,
-              'host agent matches the build',
+        c.add(h_dll is not None and file_hash(os.path.join(HOST_BIN, 'coop_agent.dll')) == deployed,
+              'host agent is the one that was deployed',
               ('%s bytes %s' % (h_size, h_dll)) if h_size else 'missing - run tools/remote.py deploy-link')
 
     # Which player this machine is. Load-bearing, and silent when wrong: the agent reads coop_side.txt
@@ -491,9 +515,11 @@ def main():
 
     if reachable:
         c_dll, c_size = sha16(os.path.join(CLIENT_BIN, 'coop_agent.dll'))
-        if want_hash is not None:
-            c.add(file_hash(os.path.join(CLIENT_BIN, 'coop_agent.dll')) == want_hash,
-                  'client agent matches the build',
+        if deployed:
+            # Against the deployed record for the same reason as the host check: a rebuild is not a deploy,
+            # and the agent build is not byte-reproducible.
+            c.add(file_hash(os.path.join(CLIENT_BIN, 'coop_agent.dll')) == deployed,
+                  'client agent is the one that was deployed',
                   ('%s bytes %s' % (c_size, c_dll)) if c_size else 'missing - run tools/remote.py deploy-link')
 
         c.bin_size, _ = sha16(os.path.join(CLIENT_BIN, 'coop-link.exe'))
