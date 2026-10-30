@@ -98,6 +98,19 @@ if shutil.which("cargo"):
         # the count is a floor so an empty run cannot masquerade as a pass.
         lambda out: "test result: FAILED" not in out and passed_count(out, 200),
     )
+    # `coop-mem`'s lib tests, run separately because the crate is excluded above: its `loop_stub_volume`
+    # integration test crashes with a pre-existing 0xC0000005 (documented in NOTES.md), but `--lib` avoids that
+    # binary entirely. This matters because the team-authority gates live in `coop-mem` - `LiveDb::sql` and
+    # `LiveDb::write_car` - and excluding the whole crate meant nothing checked them.
+    suite(
+        "auth",
+        ["cargo", "test", "--offline", "--release", "-p", "coop-mem", "--lib"],
+        os.path.join(HERE, "coop-rs"),
+        # The two wiring assertions the gate depends on must be present and passing, not merely "no failures".
+        lambda out: "test result: FAILED" not in out
+        and "sql_is_gated_by_coop_auth" in out
+        and "test result: ok" in out,
+    )
 
 if shutil.which("node"):
     # ---- JS: unit + shipping-module tests ----------------------------------------------------

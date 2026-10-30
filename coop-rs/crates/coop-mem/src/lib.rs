@@ -465,7 +465,38 @@ impl Process {
     /// Encodes into a scratch buffer at the car's real position in the object, then writes only the
     /// span that holds the touched fields - not the whole 0xA132F0 object, which would also rewrite
     /// the race-control bytes and every other car.
+    ///
+    /// **Gated per car.** Writing car state into another process is exactly the write `coop-auth` was built to
+    /// police: in `Versus` each player owns one team, in `SharedTeam` a garage is shared but the two cars belong
+    /// to different players, and a client must never overwrite a car it does not own. `coop-auth` existed with
+    /// tests for precisely this and had no callers, so the rule was documented and unenforced.
+    ///
+    /// The car index is mapped to a team the only way this layer can: cars `0..1` are the player's own (the game
+    /// fields one team, two cars), everything else is another team's. That is stated rather than assumed - if it
+    /// is wrong, `may_write` refuses writes that should land, which is the safe direction, and a session shows
+    /// it immediately as cars that do not move rather than as a corrupted rival.
     pub fn write_car(&self, rsm: usize, car: &coop_proto::Car) -> Result<(), MemError> {
+        if let Some((mode, player)) = coop_auth::configured() {
+            let scope = coop_auth::Scope::PerCar;
+            let car_team = if (car.id as u32) < 2 { player.team } else { player.team.wrapping_add(1) };
+            let key = coop_auth::RowKey {
+                team: Some(car_team),
+                loadout: Some(player.loadout),
+                car: Some(car.id as u32),
+            };
+            if let Err(denied) = coop_auth::may_write(mode, &player, scope, &key) {
+                // Report where it can be seen, then refuse. `eprintln!` rather than a new log helper: this crate
+                // is used by command-line tools whose stderr is the operator's console, and adding a logging
+                // path here would be more machinery than the one line is worth.
+                eprintln!("[coop] refused car {}: {}", car.id, denied.as_str());
+                return Err(MemError::WriteFailed {
+                    addr: rsm + coop_proto::layout::car_start(car.id as usize),
+                    want: 1,
+                    wrote: 0,
+                    code: 0,
+                });
+            }
+        }
         // encode_car_motion, not encode_car: see its doc comment. Writing the full record made the
         // game dereference a track-graph index that did not belong to it and crash.
         let start = coop_proto::layout::car_start(car.id as usize);

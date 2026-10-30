@@ -86,14 +86,32 @@ crate for `Msg::Orders`: three hits, all in `coop-proto` (the enum, the encoder,
 that round-trips it. So there is currently **no client-originated write path to protect**, which is why the
 absent `may_write` call has not caused a visible bug.
 
-The risk is therefore future-facing but real: the first feature that lets a client originate a write - the
-orders path, a strategy change, a contract signing via SQL - lands in a codebase whose comments say the
-authority rules are already enforced, and they are not.
+### Fixed: the two write paths are now gated
 
-**Action for the next session:** before any client-originated write ships, either wire `gate_sql` in front of
-`coop-mem`'s statement execution and a scope check in front of `hookmail::apply`, or delete `coop-auth` and
-change the comments. Leaving a tested policy module uncalled while a comment claims it is enforced is the worst
-of the three options, because it reads as done.
+Rather than delete a tested policy module or leave the comments lying, the gate is wired in at both points
+where a value reaches the game:
+
+| path | where | gate |
+|---|---|---|
+| SQL statement | `LiveDb::sql` (`coop-mem/src/livedb.rs:525`) | `coop_auth::gate_sql` - refuses writes to unclassified tables and to rows outside this player's team |
+| car memory | `LiveDb::write_car` (`coop-mem/src/lib.rs`) | `coop_auth::may_write` with `Scope::PerCar` |
+
+Both are placed at the **chokepoint**, not at the callers, so `coop-sql`, the transplant path and anything
+added later are covered by construction. `coop-mem` already depended on `coop-auth` - it was linked from the
+start and never referenced, which is precisely how the gap survived so long.
+
+With no `coop_mode.txt`/`coop_player.txt` beside the exe, `configured()` returns `None` and nothing is gated,
+so single-player repairs keep working. That behaviour is deliberate and documented in `coop-auth`.
+
+**The car-to-team mapping is a stated assumption, not a verified fact.** `write_car` treats car indices `0..1`
+as this player's own (the game fields one team with two cars) and everything else as another team's. If that is
+wrong, the gate refuses writes that should land - the safe direction - and a session shows it immediately as
+cars that do not move, rather than as a corrupted rival. **inferred.**
+
+Two wiring tests guard it (`sql_is_gated_by_coop_auth`, `write_car_is_gated_per_car`). They read the source and
+assert the call is present and that it returns before the write, because "this function calls that one" is not
+otherwise expressible without a live game - and a missing call is exactly the failure being guarded. Removing
+either gate fails its test; verified by planting both.
 
 ---
 
@@ -214,12 +232,15 @@ This is recorded rather than fixed so the asymmetry is a decision, not an oversi
 
 | finding | severity | state |
 |---|---|---|
-| a lost clock frame desynced the pause state permanently, because nothing re-published it | **high** - "both players pause together" is a headline feature and it could silently stop working | **fixed**: the agent heartbeat re-publishes while paused; guarded by a new 18-assertion suite |
-| `coop-auth` is complete and never called, while comments claim it enforces team rules | **medium** - no client write path exists yet, so nothing is broken today; the next such feature would be unprotected | recorded here, not fixed; needs a decision |
+| a lost clock frame desynced the pause state permanently, because nothing re-published it | **high** | **fixed**: the agent heartbeat re-publishes while paused; guarded by an 18-assertion suite |
+| `coop-auth` is complete and never called, while comments claim it enforces team rules | **medium** - nothing broken today, but the guarantee was absent | **fixed**: gated at both write chokepoints (`LiveDb::sql`, `LiveDb::write_car`), with wiring tests |
 | save "opaque / unreadable" was imprecise: container is Unreal's, payload is compressed | low | corrected in this document and in `tools/save_format.py` |
-| save transfer, wire framing, layout arithmetic, session payload | **no defects found** | verified |
+| save transfer, wire framing, layout arithmetic, session payload, contract-claim loss behaviour | **no defects found** | verified |
 
 The clock finding is the one that justifies the whole exercise: every unit test passed, the state format was
 correct, and the feature still could not be relied on, because the only thing that made it self-healing was
 missing. Two claims I expected to fail did not (save wire transfer, layout arithmetic); one did (`coop-auth`
 wired to nothing); and one failure was in a place no test was looking (the clock sender).
+
+Both high/medium findings are now closed. What remains open needs the game running - see §6 - and the
+`write_car` team mapping assumption above, which only a session can confirm.

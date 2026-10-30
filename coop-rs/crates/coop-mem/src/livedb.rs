@@ -509,9 +509,23 @@ impl LiveDb {
     }
 
     /// Runs one statement, returning rows as vectors of strings.
+    ///
+    /// **Gated.** Every statement that writes passes `coop_auth::gate_sql` first, which is the only place a
+    /// team-authority rule can be enforced for this path. `coop-auth` was written for exactly this and then
+    /// never called: the crate was a dependency of `coop-mem` from the start while no code referenced it, so a
+    /// comment in the agent claimed the mode rules "decide whether a write lands" and they did not.
+    ///
+    /// Placement matters. Gating here, rather than in `coop-sql`, means every caller is covered - the binary,
+    /// the transplant path, and anything added later - because this is the single point where a statement
+    /// reaches the game.
+    ///
+    /// With no `coop_mode.txt`/`coop_player.txt` beside the exe, `configured()` is `None` and nothing is
+    /// gated: single-player repairs keep working, which is the documented behaviour.
     pub fn sql(&self, query: &str) -> Result<Vec<Vec<String>>, String> {
-        // Hard limit: writing past the statement buffer would overwrite the stub and callback,
-        // which corrupts the game rather than returning an error. 0x1E000 leaves headroom before
+        if let Some(refusal) = coop_auth::gate_sql(query) {
+            return Err(format!("refused: {refusal}"));
+        }
+        // Hard limit: writing past the statement buffer would overwrite the stub and callback,        // which corrupts the game rather than returning an error. 0x1E000 leaves headroom before
         // the output area at +0x20000.
         const MAX_SQL: usize = 0x1E000;
         if query.len() + 1 > MAX_SQL {
@@ -774,5 +788,48 @@ mod tests {
         assert_eq!(&CALLBACK[2..6], &[0x48, 0x8B, 0x79, 0x28]);
         // mov r10,[rcx+0x30]   end
         assert_eq!(&CALLBACK[6..10], &[0x4C, 0x8B, 0x51, 0x30]);
+    }
+
+    /// The SQL path must consult `coop-auth` before a statement reaches the game.
+    ///
+    /// This is a wiring test, not a policy test: the policy is covered in `coop-auth`. What went wrong before was
+    /// that the policy existed and nothing called it, so the assertion that matters is that the call is present
+    /// in `sql`. Reading the source is crude, but it is the only way to assert "this function calls that one"
+    /// without a live game, and the failure it guards against is exactly a missing call.
+    #[test]
+    fn sql_is_gated_by_coop_auth() {
+        let src = include_str!("livedb.rs");
+        let at = src.find("pub fn sql(&self, query: &str)").expect("sql fn present");
+        let body = &src[at..(at + 1200).min(src.len())];
+        assert!(
+            body.contains("coop_auth::gate_sql"),
+            "LiveDb::sql must call coop_auth::gate_sql before executing; without it the team rules are \
+             documented and unenforced"
+        );
+        // And it must be a refusal, not a warning: the statement must not run after a denial.
+        assert!(
+            body.contains("return Err") && body.find("gate_sql").unwrap() < body.find("return Err").unwrap(),
+            "the gate must return before the statement is written to the target"
+        );
+    }
+
+    /// `write_car` must consult `coop-auth` per car, for the same reason.
+    #[test]
+    fn write_car_is_gated_per_car() {
+        let src = include_str!("lib.rs");
+        let at = src.find("pub fn write_car(").expect("write_car present");
+        let body = &src[at..(at + 1600).min(src.len())];
+        assert!(
+            body.contains("coop_auth::may_write"),
+            "write_car must consult may_write before writing another process's memory"
+        );
+        assert!(
+            body.contains("coop_auth::Scope::PerCar"),
+            "the scope must be PerCar: a car belongs to one player, not to the world"
+        );
+        assert!(
+            body.contains("return Err"),
+            "a denial must return rather than write"
+        );
     }
 }
