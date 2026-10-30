@@ -859,12 +859,72 @@ pub mod sim {
         if target == 0 {
             return None;
         }
+        // Check the range is readable *before* touching it. This used to read directly, which is a
+        // process-killing access violation inside any host where `base + SIMULATE_RVA` is not mapped - and
+        // that includes the game if the offset ever moves, plus every other process if the proxy is copied
+        // into the wrong folder. An agent that can take down its host just by being loaded is unacceptable,
+        // so an unmapped or non-readable range is a normal "None" here, not a crash.
+        if !readable(target, n) {
+            return None;
+        }
         let p = target as *const u8;
         let mut out = Vec::with_capacity(n);
         for i in 0..n {
             out.push(unsafe { *p.add(i) });
         }
         Some(out)
+    }
+
+    /// True when `[target, target + n)` is committed and readable in this process.
+    ///
+    /// Walks regions with `VirtualQuery` because a range can straddle two: a 16-byte function prologue near the
+    /// end of a page is one region ending with `PAGE_NOACCESS` after it. Only `STATE_COMMITTED` with a
+    /// read-permitting protection counts; `PAGE_GUARD` also reads as readable but raises on access.
+    pub fn readable(target: usize, n: usize) -> bool {
+        if target == 0 || n == 0 {
+            return false;
+        }
+        const STATE_COMMITTED: u32 = 0x1000;
+        const PAGE_GUARD: u32 = 0x100;
+        const PAGE_NOACCESS: u32 = 0x01;
+        let mut cursor = target;
+        let end = match target.checked_add(n) {
+            Some(e) => e,
+            None => return false,
+        };
+        while cursor < end {
+            let mut mi = MemoryBasicInformation {
+                base_address: std::ptr::null_mut(),
+                allocation_base: std::ptr::null_mut(),
+                allocation_protect: 0,
+                partition_id: 0,
+                _pad: 0,
+                region_size: 0,
+                state: 0,
+                protect: 0,
+                kind: 0,
+                _pad2: 0,
+            };
+            let got = unsafe {
+                VirtualQuery(cursor as *const c_void, &mut mi, std::mem::size_of::<MemoryBasicInformation>())
+            };
+            if got == 0 {
+                return false;
+            }
+            if mi.state != STATE_COMMITTED || mi.protect & PAGE_NOACCESS != 0 || mi.protect & PAGE_GUARD != 0 {
+                return false;
+            }
+            let region_end = match (mi.base_address as usize).checked_add(mi.region_size) {
+                Some(e) => e,
+                None => return false,
+            };
+            if region_end <= cursor {
+                // No forward progress; refuse rather than loop forever.
+                return false;
+            }
+            cursor = region_end.min(end);
+        }
+        true
     }
 
     pub fn hex(bytes: &[u8]) -> String {
@@ -1622,6 +1682,23 @@ pub fn run(pid: u32, supervisor: &str) {
     log(&format!("agent started in pid {pid}, supervisor {supervisor}"));
     #[cfg(windows)]
     {
+        // Refuse to touch a process that is not the game. The offsets below are absolute RVAs into
+        // F1Manager24.exe; reading them in any other host is at best meaningless and at worst a crash. The
+        // proxy only ever loads this beside the game, but "only ever" is not a safety property - a copied
+        // folder or a different game in the same directory would otherwise turn a mod into a process killer.
+        match std::env::current_exe().ok().and_then(|p| p.file_name().map(|n| n.to_string_lossy().to_string())) {
+            Some(exe) if exe.eq_ignore_ascii_case("F1Manager24.exe") => {}
+            Some(exe) => {
+                log(&format!(
+                    "NOT the game ({exe}) - the agent will not read game offsets here and stays idle. \
+                     Co-op needs the agent inside F1Manager24.exe."
+                ));
+                loop {
+                    std::thread::sleep(Duration::from_secs(3600));
+                }
+            }
+            None => log("could not determine the host executable name; continuing cautiously"),
+        }
         // First, before any hook or write can go wrong: make a crash explain itself.
         crash::install();
         log(&format!("evidence: {}", crash::summary()));

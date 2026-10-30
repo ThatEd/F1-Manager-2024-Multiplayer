@@ -3474,3 +3474,50 @@ Both machines are armed for one test launch: `version.dll` 122,368 (fixed, loads
 whole point of this note is that the previous attempt was armed on a guess. What is now different is that the
 guess has a documented mechanism behind it, and the first thing to read after launching is
 `python tools/launch_verdict.py`.
+
+### 2026-10-30 - Correcting the corrected diagnosis, and a real crash fixed
+
+I claimed the launch failure was `LoadLibraryA` inside `DllMain`, citing Microsoft's guidance. **I could not
+reproduce that.** A minimal proxy that calls `LoadLibraryA` from `DllMain` did not kill its host - both the
+in-DllMain and off-thread versions loaded the target DLL and the host survived (`MODE=old rc=0`,
+`MODE=thread rc=0`). So the loader-lock change is a genuine correctness improvement, correctly made, but it is
+**not** the proven cause of anything. The note above says otherwise and this supersedes it.
+
+What the evidence actually supports:
+
+**The game's crashes (0xc0000409) and the agent's own faults (0xc0000005 at a fixed offset) are different
+events.** `0xc0000409` is `STATUS_STACK_BUFFER_OVERRUN` / `__fastfail` - on Windows that is what a Rust abort
+raises, and the workspace builds with `panic = "abort"`, so a panic anywhere in the agent kills the game. The
+agent now installs a panic hook that logs the location before aborting, so the next occurrence will name a line
+instead of leaving a bare `ucrtbase.dll` entry.
+
+**A real crash, found by loading the agent into a scratch host.** Reproduced three times, deterministic:
+`0xc0000005` at a fixed offset, with the agent's own log reaching exactly:
+
+```
+[agent] agent started in pid ...
+[agent] evidence: trace ... | dumps in ...
+```
+
+and the trace recording `first-chance code=0xc0000005 ... UNHANDLED`, with a minidump written by the agent's
+own crash handler. It came from `bytes_at(base + SIMULATE_RVA, 16)` - an unchecked read of 16 bytes at a fixed
+RVA inside *whatever process loaded the DLL*. In `agenthost.exe` that address is unmapped and the host died.
+In `F1Manager24.exe` it happens to be mapped, which is why the game got further.
+
+The game itself was therefore not the victim of this one. **Any other host was**, and that is not acceptable in
+a file whose whole job is to be dropped next to an executable:
+
+- `bytes_at` now calls a `readable()` guard that walks `VirtualQuery` regions and requires committed,
+  read-permitting, non-`PAGE_GUARD` memory across the whole range. Unmapped becomes `None`, not a crash.
+- The agent refuses to read game offsets unless the host is named `F1Manager24.exe`, logs why, and idles. A
+  copied folder, or a different game in the same directory, now costs the mod rather than the process.
+
+**Verified, not asserted.** The same host that produced `EXIT=-1073741819` and a minidump now returns
+`EXIT=0` and prints `HOST ALIVE`, with the log line `NOT the game (agenthost.exe) - the agent will not read
+game offsets here and stays idle`. Renaming that same host to `F1Manager24.exe` makes the agent proceed again
+and report `sim entry: ... unreadable` instead of faulting. Both directions confirmed in one session.
+
+**Where this leaves the diagnosis.** The `0xc0000409` in the game remains **unexplained**; what changed is that
+it can no longer happen silently. The honest position is that the next launch is still an experiment, and the
+first thing to read is `coop_agent.log` for a `PANIC at <file>:<line>` line - which is the one piece of
+information that would turn this from inference into fact.
