@@ -619,7 +619,14 @@ impl Mailbox {
             // SAFETY: `busy` was set with a release store after the bytes were written, and only the
             // callback clears it. No other thread touches this buffer while it is set.
             let all = unsafe { &*self.buffers.get() };
-            unsafe { apply(base, &all[start..start + BUFFER_LEN], n) }
+            // `get` rather than direct indexing. `idx` can only be 0 or 1 by construction (it is only ever
+            // stored as `1 - published`), but this runs on the game thread inside the sim call, and a slice
+            // index out of range *panics* - which, with `panic = "abort"`, takes the process down. A corrupt
+            // atomic should cost one frame, not the game.
+            match all.get(start..start + BUFFER_LEN) {
+                Some(frame) => unsafe { apply(base, frame, n) },
+                None => 0,
+            }
         };
         self.entries_written.fetch_add(wrote, Ordering::Relaxed);
         self.applied.fetch_add(1, Ordering::Relaxed);

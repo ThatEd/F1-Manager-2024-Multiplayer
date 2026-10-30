@@ -228,19 +228,54 @@ This is recorded rather than fixed so the asymmetry is a decision, not an oversi
 
 ---
 
+## 9. Tyre sync and command bytes — sound, and one crash risk removed
+
+**Tyre sync is correctly guarded, and it is the model `coop-auth` should have followed.** Every value written
+goes through `plausible(value, bounds)` against `off::tyre_range`, on *both* the staging side
+(`hookmail::tyre_entries:204`) and the receiving side (`coop-agent/src/lib.rs:718`), and a value that fails is
+**skipped rather than clamped** - a clamp is still a lie the sim acts on, whereas a skip leaves the client's
+own model in charge of something evidently not understood. `NaN`/`inf` are refused separately for motion
+fields. **verified.**
+
+`Entry.width` is correct at every construction site: 1 for the state bytes (`RACE_CONTROL` carries `(offset,
+width)` pairs explicitly), 4 for floats, and `apply` skips any width it does not recognise rather than guessing
+- which matters because `RF_STATE` sits at `0xA13289`, one byte from the end of the object, so a 4-byte store
+there would write past it. **verified.**
+
+**Command bytes: defined but not wired.** `layout::cmd::ALL` (nine action bytes: stay-out, garage release, pit
+request, wing, tyre set) is defined and documented as "taken from the proven Lua prototype", but nothing in
+`coop-agent` stages them - the same finding as `Msg::Orders`, and consistent with it. So there is no
+client-originated command path to range-check yet. When there is one, the check belongs where the tyre check
+already is: at staging time, skipping implausible values. **verified absent.**
+
+**One crash risk removed.** `Mailbox::drain` clamps the entry count but indexed the buffer directly:
+
+```rust
+unsafe { apply(base, &all[start..start + BUFFER_LEN], n) }
+```
+
+`start` derives from an `AtomicUsize` that is only ever stored as `0` or `1`, so this cannot trip today - but
+it runs on the **game thread inside the sim call**, and a slice index out of range *panics*, which with
+`panic = "abort"` takes the process down. A corrupt atomic should cost one frame, not the game. Now uses
+`get(..)` and treats a miss as zero entries. **fixed.**
+
+---
+
 ## Summary of what this audit changed
 
 | finding | severity | state |
 |---|---|---|
 | a lost clock frame desynced the pause state permanently, because nothing re-published it | **high** | **fixed**: the agent heartbeat re-publishes while paused; guarded by an 18-assertion suite |
 | `coop-auth` is complete and never called, while comments claim it enforces team rules | **medium** - nothing broken today, but the guarantee was absent | **fixed**: gated at both write chokepoints (`LiveDb::sql`, `LiveDb::write_car`), with wiring tests |
+| `Mailbox::drain` indexed the shared buffer directly on the game thread | low (unreachable today) but the failure mode is the whole process | **fixed**: `get(..)` with a zero-entry fallback |
 | save "opaque / unreadable" was imprecise: container is Unreal's, payload is compressed | low | corrected in this document and in `tools/save_format.py` |
-| save transfer, wire framing, layout arithmetic, session payload, contract-claim loss behaviour | **no defects found** | verified |
+| save transfer, wire framing, layout arithmetic, session payload, tyre guards, entry widths, contract-claim loss behaviour | **no defects found** | verified |
 
-The clock finding is the one that justifies the whole exercise: every unit test passed, the state format was
-correct, and the feature still could not be relied on, because the only thing that made it self-healing was
-missing. Two claims I expected to fail did not (save wire transfer, layout arithmetic); one did (`coop-auth`
-wired to nothing); and one failure was in a place no test was looking (the clock sender).
+Three of the four findings are fixed; the fourth is a documentation correction. The clock finding is the one
+that justifies the whole exercise: every unit test passed, the state format was correct, and the feature still
+could not be relied on, because the only thing that made it self-healing was missing. Two claims I expected to
+fail did not (save wire transfer, layout arithmetic); one did (`coop-auth` wired to nothing); and one failure
+was in a place no test was looking (the clock sender).
 
-Both high/medium findings are now closed. What remains open needs the game running - see §6 - and the
-`write_car` team mapping assumption above, which only a session can confirm.
+What remains open needs the game running - see §6 - plus the `write_car` team mapping assumption in §2, which
+only a session can confirm.
