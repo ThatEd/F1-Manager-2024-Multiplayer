@@ -60,9 +60,9 @@ python -I run_all_tests.py teams    # one player cannot take every team
 python -I run_all_tests.py redaction   # no private identifiers in the tree
 ```
 
-Currently: **249 Rust tests**, plus 19 suites (`rust`, `auth`, `unit`, `press`, `observe`, `steam`,
-`inert`, `drive`, `render`, `boot`, `pak`, `proxy`, `offsets`, `gaps`, `teams`, `clock`, `guard`, `e2e`,
-`redaction`) and the redaction check that fails if a private path has leaked into the tree.
+Currently: **249 Rust tests**, plus 20 suites (`rust`, `auth`, `unit`, `press`, `observe`, `steam`,
+`inert`, `drive`, `render`, `boot`, `pak`, `proxy`, `offsets`, `gaps`, `surface`, `teams`, `clock`,
+`guard`, `e2e`, `redaction`) and the redaction check that fails if a private path has leaked into the tree.
 All of it passes from a clean clone. The runner prints each suite's own assertion count rather than one
 grand total, because two suites report `N/M passed` and two report `N passed`, and summing them across
 both spellings double-counts.
