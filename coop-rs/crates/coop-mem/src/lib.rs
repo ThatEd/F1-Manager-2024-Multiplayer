@@ -476,6 +476,21 @@ impl Process {
     /// is wrong, `may_write` refuses writes that should land, which is the safe direction, and a session shows
     /// it immediately as cars that do not move rather than as a corrupted rival.
     pub fn write_car(&self, rsm: usize, car: &coop_proto::Car) -> Result<(), MemError> {
+        // Bounds first, and here rather than only in the caller. `write_cars` already skips ids past
+        // `CAR_MAX`, but this function is `pub` and indexes `car_start(car.id)` without a check, so anything
+        // that reaches it by another route computes an address up to `(255 - CAR_MAX) * CAR_STRIDE` past the
+        // car table - roughly a megabyte beyond the sim object, i.e. into whatever the allocator put next.
+        // The write would be "successful" and corrupt unrelated game memory. `car_at`, the read path, already
+        // refuses `car >= CAR_MAX`; this is the same rule at the write chokepoint, so the guarantee does not
+        // depend on every future caller remembering it.
+        if car.id as usize >= coop_proto::layout::CAR_MAX {
+            return Err(MemError::WriteFailed {
+                addr: rsm.saturating_add(coop_proto::layout::car_start(car.id as usize)),
+                want: 1,
+                wrote: 0,
+                code: 0,
+            });
+        }
         if let Some((mode, player)) = coop_auth::configured() {
             let scope = coop_auth::Scope::PerCar;
             let car_team = if (car.id as u32) < 2 { player.team } else { player.team.wrapping_add(1) };

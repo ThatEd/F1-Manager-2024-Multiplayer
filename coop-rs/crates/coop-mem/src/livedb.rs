@@ -832,4 +832,35 @@ mod tests {
             "a denial must return rather than write"
         );
     }
+
+    /// `write_car` must refuse an out-of-range car id itself, not rely on `write_cars` having filtered.
+    ///
+    /// `car_start(car.id)` is unchecked arithmetic, so an id past `CAR_MAX` computes an address beyond the sim
+    /// object: 255 would land about a megabyte past the car table. `write_cars` does skip those ids today, but
+    /// `write_car` is `pub`, and the read path (`car_at`) already refuses the same range - so the rule belongs
+    /// at the chokepoint rather than in one caller. Same reasoning as putting the auth gate here.
+    #[test]
+    fn write_car_refuses_an_out_of_range_car_id() {
+        let src = include_str!("lib.rs");
+        let at = src.find("pub fn write_car(").expect("write_car present");
+        // Wide enough to reach the write at the end of the function, not just the top of it.
+        let body = &src[at..(at + 3000).min(src.len())];
+        assert!(
+            body.contains("CAR_MAX"),
+            "write_car must bound the car id: an unchecked car_start(id) writes outside the sim object"
+        );
+        // The bound must come before the first write, and must return rather than clamp.
+        let bound = body.find("CAR_MAX").unwrap();
+        let write = body
+            .find("write_into")
+            .expect("write_car must eventually write something");
+        assert!(
+            bound < write,
+            "the bounds check must precede the write"
+        );
+        assert!(
+            body.contains("return Err"),
+            "an out-of-range id must be refused, not clamped to the last car"
+        );
+    }
 }

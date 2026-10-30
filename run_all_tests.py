@@ -106,10 +106,14 @@ if shutil.which("cargo"):
         "auth",
         ["cargo", "test", "--offline", "--release", "-p", "coop-mem", "--lib"],
         os.path.join(HERE, "coop-rs"),
-        # The two wiring assertions the gate depends on must be present and passing, not merely "no failures".
+        # Every gate assertion must be present and passing, not merely "no failures". Naming them is the
+        # point: a test that is silently skipped (renamed, `#[ignore]`d, filtered out) leaves the rule
+        # unenforced while the suite still reports green, which is how the gates went unchecked before.
         lambda out: "test result: FAILED" not in out
+        and "test result: ok" in out
         and "sql_is_gated_by_coop_auth" in out
-        and "test result: ok" in out,
+        and "write_car_is_gated_per_car" in out
+        and "write_car_refuses_an_out_of_range_car_id" in out,
     )
 
 if shutil.which("node"):

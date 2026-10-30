@@ -389,6 +389,33 @@ with absolute paths, the test fails without the fix and passes with it.
 
 ---
 
+## 13. Car-id bounds: no live hole, but the chokepoint trusted its input
+
+The question was whether a hostile or corrupt frame from the other player could make the mod write outside the
+sim object. Tracing it end to end:
+
+* `Msg::Snapshot` decodes a car count and **refuses anything but exactly `CAR_COUNT`** (`coop-proto/src/lib.rs:683-686`), so a peer cannot ask for extra cars.
+* The per-car `id` inside the payload is **not** range-checked by `decode_car` (`:483` reads it as a raw `u8`).
+* `write_cars` skips ids past `CAR_MAX` (`coop-mem/src/lib.rs:523-525`), so that path is safe.
+
+So there is **no live out-of-bounds write today**. But `write_car` is `pub` and computed
+`car_start(car.id as usize)` with no check of its own - and `car_start` is unchecked arithmetic
+(`layout.rs:222-224`), unlike the read path `car_at`, which refuses `car >= CAR_MAX` (`:157-159`). An id of 255
+reaching `write_car` by any other route would land about `(255-22) * 0x10D8` - roughly **1 MB** - past the car
+table, i.e. into whatever the allocator put next, and the write would report success.
+
+The guarantee sat in one caller rather than at the chokepoint, which is the same mistake as `coop-auth` (§3): a
+documented rule that holds only while every future caller remembers it. Fixed by refusing `id >= CAR_MAX` inside
+`write_car`, before any address is computed or written, and before the auth gate, so a bad id is reported as a
+bad id rather than as an authorisation failure. A test asserts the bound exists, precedes the write, and
+returns rather than clamping to the last car.
+
+**Not changed, deliberately:** `decode_car` still accepts any `u8`. Rejecting an out-of-range id at decode time
+would also be defensible, but it would turn a single bad car into a rejected frame and drop a whole snapshot;
+refusing the one car loses less. Either way the write chokepoint is now the thing that is actually enforced.
+
+---
+
 ## Summary of what this audit changed
 
 | finding | severity | state |
@@ -398,6 +425,7 @@ with absolute paths, the test fails without the fix and passes with it.
 | **team retarget's "edit then reload" loses the edit**: `LoadGame` re-reads from disk, and nothing persists a runtime `UPDATE` | **high** - the recommended Versus implementation cannot work as written | recorded; the fix is a persistence step, and the first experiment is specified in §10 |
 | **the documented 30-name save-slot space is not the file space** (`save165`–`save168` and `customisation.sav` exist outside it) | **medium** - a co-op session named with an invented `slotName` may never be loadable | recorded in §11; the design should use an observed slot name |
 | **a protocol version mismatch was reported as "unreadable frame"**, discarding the reason that identifies it | **medium** - the ordinary failure after an update, misdiagnosed as a network problem | **fixed**: `BadVersion` is named with the peer version and the action; both halves tested |
+| **`write_car` trusted its car id**: unchecked `car_start(id)` could target ~1 MB past the car table | low (no live path - `write_cars` filters) but the failure is corrupting unrelated game memory | **fixed**: bounds refused at the chokepoint, before address and before auth |
 | `Mailbox::drain` indexed the shared buffer directly on the game thread | low (unreachable today) but the failure mode is the whole process | **fixed**: `get(..)` with a zero-entry fallback |
 | save "opaque / unreadable" was imprecise: container is Unreal's, payload is compressed | low | corrected in this document and in `tools/save_format.py` |
 | `SIMULATE_RVA` still points at the right function in the installed exe | - | **verified statically**: file bytes at the RVA match the live-read prologue exactly (`tools/verify_offsets.py`) |
