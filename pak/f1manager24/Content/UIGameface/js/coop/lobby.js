@@ -623,17 +623,18 @@
                 })
                 .catch(function (e) {
                     self.setState({ armed: false });
-                    /* The agent is a DLL inside the game process. There is nothing to start - the message must
-                     * not send anyone looking for a launcher or a separate program, because neither is the
-                     * fix. The launcher wording survived one round of editing here even though the comment
-                     * above it said not to; that is why the requirement is now spelled out in the text
-                     * itself. */
+                    /* The agent is loaded by `version.dll` beside the game exe, so there is normally nothing to
+                     * run: opening the game is the install step. The only case that reaches this message is a
+                     * copy where that file is missing or failed, so it says exactly which file to look for and
+                     * what its log will say - not "run an injector", which is a second step to forget and is
+                     * what this mechanism exists to remove. */
                     self.setStatus(
                         "co-op agent not in this game process (" +
                             String(e.message || e) +
-                            "). The agent is a DLL inside the game and is injected, not launched - there is" +
-                            " no separate program to run. Inject coop_agent.dll into the running game (the" +
-                            " injector is folded into coop-link: coop-link --inject), then reopen this screen.",
+                            "). The agent is loaded automatically by a file called version.dll next to" +
+                            " F1Manager24.exe, so this means that file is missing or could not load" +
+                            " coop_agent.dll. Reinstalling the mod puts both back; coop_proxy.log next to" +
+                            " the game exe records which of the two failed.",
                         true
                     );
                 });

@@ -1,4 +1,4 @@
-﻿#!/usr/bin/env python3
+#!/usr/bin/env python3
 """Build, verify and deploy the co-op UI pak.
 
 Why this exists
@@ -307,6 +307,59 @@ def check_installed(game_root: str, label: str = 'host', repak: str | None = Non
     return []
 
 
+def install_proxy(game_root: str, label: str = 'host') -> list[str]:
+    """Put `version.dll` (the auto-loader) next to the game exe, after proving it can be loaded safely.
+
+    This is what makes the agent arrive without anyone running anything: Windows loads a DLL from the exe's own
+    directory in preference to the system one, so a file named `version.dll` beside `F1Manager24.exe` is what the
+    game's import of that DLL resolves to. It forwards the three functions the game calls and also loads
+    `coop_agent.dll`.
+
+    The check is not optional. A proxy that is missing even one imported name stops the game from starting with
+    "procedure entry point not found", which reads as a corrupted install and is the worst failure this mod can
+    cause. So the export set is verified against the exe before anything is copied, and a mismatch skips the
+    install rather than risking it.
+    """
+    proxy = find_proxy()
+    if proxy is None:
+        return ['proxy DLL not built - run: cargo build --release -p coop-proxy']
+
+    exe = os.path.join(game_root, 'F1Manager24', 'Binaries', 'Win64', 'F1Manager24.exe')
+    checker = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'check_proxy.py')
+    res = subprocess.run([sys.executable, checker, proxy, '--game-exe', exe],
+                         capture_output=True, text=True)
+    if res.returncode != 0:
+        # Refuse, and show why. Shipping this would break the game's start-up, not just this mod.
+        out = (res.stdout or '') + (res.stderr or '')
+        return ['proxy check failed, NOT installed:\n' + out.strip()]
+
+    bin_dir = os.path.join(game_root, 'F1Manager24', 'Binaries', 'Win64')
+    dst = os.path.join(bin_dir, 'version.dll')
+    shutil.copy2(proxy, dst)
+
+    # The agent is only loaded when this marker exists, so installing the proxy is a **no-op** until co-op is
+    # switched on. That is deliberate: a proxy that stops the game launching is the worst failure this mod can
+    # produce and it happened once, so the safe state has to be the state a fresh install lands in.
+    marker = os.path.join(bin_dir, 'coop_proxy.enable')
+    if not os.path.exists(marker):
+        # No marker is the intended default; say so, because a player who sees no co-op menu will otherwise
+        # assume the install failed.
+        print('  note: %s loads the forwarder only (coop_proxy.enable absent).' % label)
+        print('        Create %s to let it load the agent.' % marker)
+    return []
+
+
+def find_proxy():
+    """The built `version.dll` stand-in, or None."""
+    target = os.environ.get('CARGO_TARGET_DIR', r'E:\TEMP\coop-target')
+    for p in (os.path.join(target, 'release', 'coop_proxy.dll'),
+              os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+                           'coop-rs', 'target', 'release', 'coop_proxy.dll')):
+        if os.path.isfile(p):
+            return p
+    return None
+
+
 def deploy(game_root: str, label: str = 'host') -> bool:
     target = installed_path(game_root)
 
@@ -331,6 +384,13 @@ def deploy(game_root: str, label: str = 'host') -> bool:
         print('  ! could not write %s: %s' % (target, exc))
         return False
     print('  deployed to %s (%s)' % (target, label))
+
+    # Then the auto-loader, so the agent is in the process without anyone running an injector. Refuses rather
+    # than risking a game that will not start; see `install_proxy`.
+    for problem in install_proxy(game_root, label):
+        print('  FAIL %s' % problem)
+        return False
+
     return True
 
 

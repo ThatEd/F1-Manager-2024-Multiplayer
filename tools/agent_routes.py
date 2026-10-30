@@ -93,10 +93,11 @@ def main():
         print()
         print("Nothing is listening on %s." % ", ".join(str(p) for p in ports))
         print("This is NOT a routing problem. In order of likelihood:")
-        print("  1. the agent is not injected - run: coop-link --inject")
-        print("  2. the game is not running")
-        print("  3. the agent failed to start its HTTP thread; check coop_agent.log next to the exe for")
-        print("     'agent loaded into ...' and 'lobby endpoint on http://127.0.0.1:<port>/coop/'")
+        print("  1. the game is not running")
+        print("  2. version.dll is missing next to F1Manager24.exe - it is what loads the agent, and")
+        print("     coop_proxy.log beside it records whether it loaded. Reinstalling the mod restores it.")
+        print("  3. the agent started but its HTTP thread failed; coop_agent.log should still show")
+        print("     'agent loaded into ...' if the DLL was in the process.")
         return 2
 
     print()

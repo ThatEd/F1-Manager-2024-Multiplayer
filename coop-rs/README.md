@@ -62,20 +62,34 @@ Design choices, each one a bug the Lua transport hit:
   the breadcrumb/minidump work should land next, because a hang currently leaves no evidence.
 
 
-## In-process agent (`crates/coop-agent`) and injector (`crates/coop-inject`)
+## In-process agent (`crates/coop-agent`), auto-loader (`crates/coop-proxy`)
 
-The agent is a standalone DLL. It exists because writes must happen on the game thread, so that half
-cannot move out of process. This increment deliberately does **nothing dangerous**: no hooks, no
-memory access, no writes. It proves injection, thread startup and IPC only.
+The agent is a DLL. It exists because writes must happen on the game thread, so that half cannot move out of
+process. **It loads itself when the game starts** - copy `version.dll` and `coop_agent.dll` beside
+`F1Manager24.exe` and open the game. There is no injector to run and no launcher to start it from.
+
+`version.dll` is a *forwarder*: Windows resolves a DLL in the executable's own directory before the system one,
+by name, so this file is what the game's import of `version.dll` finds. It forwards the three functions the exe
+imports (`GetFileVersionInfoSizeW`, `GetFileVersionInfoW`, `VerQueryValueW`) to the real DLL and also loads
+`coop_agent.dll`. If the agent is absent the game runs as plain single-player and `coop_proxy.log`, beside the
+exe, records why - a proxy that is missing an export would stop the game starting at all, which is why
+`tools/check_proxy.py` compares its export table against the exe's import table before anything is installed.
 
 ```sh
-# 1. supervisor
+# 1. supervisor (the host tab starts one in-process, so this is only for a relay on another machine)
 coop-supervisor --port 45990
 
-# 2. inject (the agent connects to 127.0.0.1:45990 by default)
+# 2. install, then just open the game
+python tools/deploy_pak.py            # pak + version.dll + the agent
+```
+
+For a one-off (debugging a build without reinstalling), the injector still exists:
+
+```sh
 coop-inject --pid <pid> --dll coop_agent.dll
 coop-inject --name F1Manager24 --dll coop_agent.dll
 ```
+
 
 Verified against a live race (pid 44316):
 

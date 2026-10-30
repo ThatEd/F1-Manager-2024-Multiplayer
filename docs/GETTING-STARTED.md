@@ -34,13 +34,17 @@ The script refuses to finish unless the pak in the install is byte-identical to 
 source. That check exists because a stale pak once made a finished feature look like a code defect —
 see the header of the file.
 
-Then build the agent and inject it:
+Then build the agent. Nothing needs to be run afterwards - it loads with the game:
 
 ```bash
 cd coop-rs
-cargo build --release -p coop-agent
-# inject coop_agent.dll into the running game; tools/remote.py and tools/preflight.py help.
+cargo build --release -p coop-agent -p coop-proxy
 ```
+
+`deploy_pak.py` copies `coop_agent.dll` and `version.dll` beside `F1Manager24.exe`. `version.dll` is a
+forwarder for the real one, so Windows loads it first and it loads the agent. Open the game and the agent is
+in the process; `coop_proxy.log` next to the exe records what happened. There is no injector step and no
+launcher to start the game through.
 
 ### Telling a machine which player it is
 

@@ -50,6 +50,34 @@ console.log('lobby_boot: does the multiplayer entry point actually reach the UI?
 
 const lobbySrc = fs.readFileSync(path.join(COOP, 'lobby.js'), 'utf8');
 
+/**
+ * Source with `//` and `/* *\/` comments removed, so an assertion about *what the player is told* is not
+ * tripped by a comment that quotes the wording it forbids. Strings are left intact - that is the point.
+ */
+function stripComments(src) {
+  return src
+    .replace(/\/\*[\s\S]*?\*\//g, ' ')
+    .split('\n')
+    .map((line) => {
+      // Only strip `//` when it is not inside a string. A simple scan is enough here: the file uses no regex
+      // literals containing `//`, and a miss only makes the assertion stricter, never falsely lenient.
+      let inStr = false, quote = null;
+      for (let i = 0; i < line.length; i++) {
+        const ch = line[i];
+        if (inStr) {
+          if (ch === '\\') { i++; continue; }
+          if (ch === quote) inStr = false;
+        } else if (ch === '"' || ch === "'" || ch === '`') {
+          inStr = true; quote = ch;
+        } else if (ch === '/' && line[i + 1] === '/') {
+          return line.slice(0, i);
+        }
+      }
+      return line;
+    })
+    .join('\n');
+}
+
 // ---------------------------------------------------------------------------------------------
 // 1. Every module lobby.js requires must resolve
 // ---------------------------------------------------------------------------------------------
@@ -165,6 +193,17 @@ console.log('\nmode list and race replay');
     'the tile uses the Exclusive Scenarios texture, as asked');
   ok(/MainMenu_coopMode/.test(lobbySrc), 'the tile carries a hook class for the purple treatment');
   ok(/CoopPurple|hue-rotate/.test(lobbySrc), 'the purple is applied by CSS, not a separate texture');
+
+  /* Player-facing text must never ask anyone to run an injector or a launcher. The agent is loaded by
+   * version.dll beside the game exe, so opening the game is the whole install step; telling a player otherwise
+   * is a second step to forget, and forgetting it looks exactly like a broken mod. This exact wording
+   * regressed twice, so it is asserted - against the code with comments removed, because the comment above this
+   * assertion necessarily mentions the wording it forbids. */
+  const codeOnly = stripComments(lobbySrc);
+  ok(!/coop-link --inject|run an injector|start the game through/i.test(codeOnly),
+    'no player-facing text asks for a manual inject or a launcher');
+  ok(/version\.dll/.test(codeOnly),
+    'the failure message names the file that actually loads the agent');
 
   /* A pak and the agent DLL are deployed separately, so they drift. When the pak called a route the injected
    * DLL did not serve, the player saw a bare "HTTP 404" and it read as a broken mod. The screen must probe the

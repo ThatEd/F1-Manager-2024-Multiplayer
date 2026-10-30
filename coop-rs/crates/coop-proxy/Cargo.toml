@@ -1,0 +1,11 @@
+[package]
+name = "coop-proxy"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+description = "A version.dll stand-in that loads the co-op agent into the game at start-up"
+
+[lib]
+crate-type = ["cdylib"]
+
+[dependencies]

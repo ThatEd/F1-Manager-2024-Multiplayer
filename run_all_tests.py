@@ -125,6 +125,21 @@ if shutil.which("node"):
     # button failed: every other check asked "was the pak built from the right files", none asked "will the
     # game find them", and a pak with bare entry paths loads and overrides nothing.
     suite("pak", ["node", "pak_paths_test.js"], HEADLESS, lambda out: passed_count(out, 8))
+
+    # The proxy is what loads the agent without anyone running an injector, and a wrong one stops the game from
+    # starting at all ("procedure entry point not found"), which reads as a corrupted install. The check
+    # compares its export table against the exe's import table; it skips when the game is absent, so a clone
+    # without the game stays green with a named gap.
+    proxy = os.path.join(os.environ.get("CARGO_TARGET_DIR", os.path.join(HERE, "coop-rs", "target")),
+                         "release", "coop_proxy.dll")
+    # The game is only needed for its import table. `COOP_GAME` points at an install elsewhere; without either,
+    # `check_proxy.py` reports SKIP rather than failing, the same policy as the render-dependent suites.
+    game = os.environ.get("COOP_GAME", os.path.join("E:" + os.sep, "Steam", "steamapps", "common",
+                                                    "F1 Manager 2024"))
+    suite("proxy", [sys.executable, "-I", os.path.join(TOOLS, "check_proxy.py"), proxy,
+                    "--game-exe", os.path.join(game, "F1Manager24", "Binaries", "Win64",
+                                               "F1Manager24.exe")],
+          HERE, lambda out: "every imported name is exported" in out or out.strip().startswith("SKIP"))
     # One player must not be able to take every team. Reported as "player 1 being able to take every team and
     # locking them", caused by comparing a string object key against a number - always unequal, so no claim
     # was ever released. This extracts and runs the real `pickTeam` body, so a copy cannot drift from the source.

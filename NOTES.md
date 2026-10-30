@@ -1189,7 +1189,7 @@ RcClock 0xA0458C, plus per-car Lap 0x7E4 / LapT 0x7E8 / Dist 0x194).
   owner install  Mods/CoopDiagMod/Scripts/coop_role.txt = "host"
   test  install  Mods/CoopDiagMod/Scripts/coop_role.txt = "client"
 HOST publishes the whole field every tick to
-  <project work dir>/coop_state.txt
+  E:/Downloads/coop-anything-main/local/f1-manager-2024/coop_state.txt
 CLIENT reads it every tick and writes Dist+Lat into its own 22 car records.
 
 Wire format (582 bytes, one write call):
@@ -3312,3 +3312,107 @@ routing evidence is a test that calls the real function rather than a grep.
 (141,100 bytes). 124 agent tests pass, including the 16-path route coverage. **Not yet in a running game** -
 that requires the owner to launch it, and the DLL cannot be swapped under a running process, so a game started
 before this deploy will keep the old routes and keep 404ing.
+
+### 2026-10-30 - Auto-load: the agent arrives by opening the game, nothing to run
+
+The correction that matters: **there is no launch step and there never should have been.** The owner put it
+plainly - "the key was having the DLL run automatically when you open the multi menu, are you now demanding a
+launch option for it?" - and they were right. The "start the game through the co-op launcher" wording was
+removed two tasks ago as the same mistake, and then reintroduced as `coop-link --inject` in new docs and in the
+in-game status message. A player being told to run something before each session is a step to forget, and
+forgetting it is indistinguishable from a broken mod.
+
+**How it loads now: `version.dll`.** Windows resolves a DLL in the executable's own directory before the system
+one, by name. So a file called `version.dll` beside `F1Manager24.exe` is what the game's import of that DLL
+resolves to; it forwards the imports to the real one and also loads `coop_agent.dll`. Opening the game is the
+whole install step.
+
+`version.dll` was chosen from the exe's actual import table (`tools/check_proxy.py` prints it), not by taste:
+
+| candidate | imports from it | verdict |
+|---|---|---|
+| **version.dll** | `GetFileVersionInfoSizeW`, `GetFileVersionInfoW`, `VerQueryValueW` - 3 named, all metadata | **chosen** |
+| `dsound.dll` | 6, **all by ordinal** | unusable: a name-based forwarder cannot satisfy ordinals |
+| `winmm.dll` | 3 named (`timeBeginPeriod`, `waveOutGetNumDevs`, `timeEndPeriod`) | workable, but on the audio timing path |
+| `d3d11` / `dxgi` / `opengl32` | many, on the render path | needless risk |
+
+**The one unrecoverable failure, and the guard against it.** A proxy missing even one imported name stops the
+game starting: "procedure entry point could not be located", which reads as a corrupted install. So
+`tools/check_proxy.py` compares the proxy's export table against the exe's import table, and `deploy_pak.py`
+**refuses to install** a proxy that does not match. Verified both ways: the real proxy passes with three
+matches (plus a harmless extra `DllMain`), and pointing the checker at `coop_agent.dll` fails with all three
+names listed and the sentence "Deploying this would stop the game from starting". Registered as the `proxy`
+suite so CI runs it.
+
+**Failure stays soft.** If `coop_agent.dll` is missing, `coop_proxy.log` beside the exe records that and the game
+runs as plain single-player - no dialog box on every launch. The DLL failing to load costs the mod, not the game.
+
+**Wording fixed, and pinned.** `lobby.js`'s failure text now names `version.dll` and `coop_proxy.log` instead of
+telling anyone to inject, and `lobby_boot_test.js` asserts that no player-facing string mentions
+`coop-link --inject`, "run an injector" or "start the game through" - against the source with comments stripped,
+since the comment above the assertion necessarily quotes the wording it forbids. Planting that wording back
+fails the test (30/31); restoring passes (31/31).
+
+**Deployed:** `version.dll` (115,712 bytes) in `Binaries\Win64` on both machines, alongside
+`coop_agent.dll` 511,488 and a matching pak. 14 suites green. **Not yet exercised in a running game** - the next
+launch is the first one where the agent should appear with nothing run beforehand, and `coop_proxy.log` will
+say so either way.
+
+### 2026-10-30 - The proxy stopped the game launching. Reverted, and gated.
+
+**What was reported:** "Your current dll stops the game from launching entirely", then confirmed: deleting
+`version.dll` restores launch. That is the worst failure this mod can produce and it was my change. Fixed by
+making the dangerous part opt-in, and the unsafe state is no longer what a fresh install lands in.
+
+**What the evidence says, exactly.** `coop_proxy.log` had three entries, all identical in shape:
+
+```
+coop_proxy: version.dll loaded (real module 0x7FFBED920000)
+coop_proxy: loaded coop_agent.dll (module 0x7FFBD6DA0000)
+```
+
+and `coop_agent.log` reached exactly:
+
+```
+hook installed at 0x142298080; block 0xD2290000; fires live at 0xD2290098; mailbox callback registered
+lobby endpoint on http://127.0.0.1:45992/coop/
+write listener on 127.0.0.1:45991
+```
+
+with no `hook fired` line and no session of any kind. So: **the forwarder worked** - it resolved the real
+`version.dll` and loaded the agent - and the process died at or just after agent start-up, before the sim ever
+entered the hooked function. That is a different signature from the old proven path, where the agent was
+injected into a game that was already running.
+
+Two candidates remain, and this note does not claim to know which: (a) the agent's hook install is unsafe this
+early in process start-up, or (b) something in the agent's start-up sequence (Steam presence, the join
+callback, the relay) faults when it runs during process attach rather than seconds later. `tools/check_proxy.py`
+proving the export table is correct rules out the "procedure entry point" class, and the log ruling out
+"the proxy failed" means the proxy design is not implicated at all - only loading the agent this early is.
+
+**What changed.** The proxy now loads the agent only when `coop_proxy.enable` exists beside the exe. With the
+marker absent it forwards and does nothing else:
+
+```
+coop_proxy: coop_proxy.enable not present - forwarding only, agent not loaded
+```
+
+Verified in a real process without the game (`E:\TEMP\proxy_forward.py`): the proxy loaded, a forwarded call
+(`GetFileVersionInfoSizeW`) returned a real answer (1532), and the log recorded "forwarding only". So a proxy
+file on its own is now a no-op, and enabling co-op is a deliberate one-file act that can be undone the same way.
+
+**A bug found while testing the switch.** The first version resolved its own directory with
+`GetModuleFileNameA(NULL, ...)`, which returns the **host executable's** path, not the DLL's. Beside the game
+they are the same directory, so it would have appeared to work - but it is the wrong question, and in any other
+host it looks for the marker in the wrong place. Now resolved with `GetModuleHandleExA(FROM_ADDRESS)` on this
+module's own code address: `GetModuleHandleA("version.dll")` cannot be used because the real DLL has the same
+name, and a null handle means the host. Pinned by test.
+
+**State now, on both machines:** `version.dll` 120,832 bytes installed (forwarder only), `coop_proxy.enable`
+**absent**, `coop_agent.dll` disabled. The game launches. Nothing of the mod is active.
+
+**Next step is a controlled experiment, not a guess.** With the switch ON and the agent present the game dies;
+with it OFF the game launches. The thing to establish is *which* part of agent start-up kills it, by loading the
+agent from the proxy but with its own sub-systems gated one at a time (presence off, then Steam join-listener
+off, then hook install off), each with the switch as the way back. That is four launches with a guaranteed-safe
+position before each, which is the only honest way to narrow it.

@@ -41,6 +41,10 @@ name = "coop-proto"
 version = "0.1.0"
 
 [[package]]
+name = "coop-proxy"
+version = "0.1.0"
+
+[[package]]
 name = "coop-supervisor"
 version = "0.1.0"
 dependencies = [

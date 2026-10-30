@@ -1,6 +1,6 @@
 [workspace]
 resolver = "2"
-members = ["crates/coop-proto", "crates/coop-auth", "crates/coop-supervisor", "crates/coop-mem", "crates/coop-agent", "crates/coop-inject", "crates/coop-link"]
+members = ["crates/coop-proto", "crates/coop-auth", "crates/coop-supervisor", "crates/coop-mem", "crates/coop-agent", "crates/coop-inject", "crates/coop-link", "crates/coop-proxy"]
 
 [workspace.package]
 version = "0.1.0"
