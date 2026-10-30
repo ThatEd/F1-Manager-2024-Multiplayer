@@ -146,15 +146,47 @@ guards are the mitigation; they catch a moved function, not a moved field.
 
 ---
 
+## 7. Shared clock — correct protocol, unreliable in practice (fixed)
+
+The union rule is sound and unit-tested: `ClockGate` holds each side's reason set, `is_stopped()` is
+`!host.is_empty() || !client.is_empty()`, and `apply()` reports the Stop/Run/NoChange transition. Pauses are
+deliberately *not* arbitrated in the supervisor, because a round trip per pause would make a stall look like an
+unfreezing game. **verified.**
+
+The failure mode nobody had covered is a **lost frame**, and it is not theoretical:
+
+- `Msg::Clock` carries one side's *complete* reason set, and `ClockGate::set` replaces that side's copy
+  wholesale - so the next frame repairs a loss completely. **verified.**
+- But the front-end sends a clock frame from exactly **one** place, inside the `SimPauseChange` wrapper
+  (`bridge.js:669`). It reports transitions, not state. **verified.**
+- And the agent's heartbeat emitted **no** clock frame at all. **verified** by searching every crate for
+  `coord::clock_frame`: the only caller was the HTTP handler behind `/coop/coordinate/clock`.
+
+So one dropped frame left the host running while the client stayed stopped, and **nothing retried it** - the
+divergence would last until that player happened to pause again. Over TCP a loss is rare, but the supervisor
+does drop frames deliberately when a socket write times out (two-second bound, "never retry a peer that
+failed"), and a reconnect drops everything queued behind it.
+
+**Fixed:** `coop-agent` now re-publishes the pause state from its heartbeat once a second, *only while paused*,
+so idle play pays nothing. That turns a loss into at most one second of divergence instead of a lost race.
+This is what the protocol comment always claimed ("full state, not a delta: a lost unpause would leave the
+world frozen with nothing to indicate why") - the state format was built for it, the sender was not.
+
+`tools/headless/clock_convergence_test.js` guards it: 18 assertions, including that the repeat still exists.
+Removing the re-publish fails one (17/18), which is the check that matters.
+
+---
+
 ## Summary of what this audit changed
 
 | finding | severity | state |
 |---|---|---|
+| a lost clock frame desynced the pause state permanently, because nothing re-published it | **high** - "both players pause together" is a headline feature and it could silently stop working | **fixed**: the agent heartbeat re-publishes while paused; guarded by a new 18-assertion suite |
 | `coop-auth` is complete and never called, while comments claim it enforces team rules | **medium** - no client write path exists yet, so nothing is broken today; the next such feature would be unprotected | recorded here, not fixed; needs a decision |
 | save "opaque / unreadable" was imprecise: container is Unreal's, payload is compressed | low | corrected in this document and in `tools/save_format.py` |
 | save transfer, wire framing, layout arithmetic, session payload | **no defects found** | verified |
 
-Two claims I expected to fail did not: the save wire transfer is complete, and the layout arithmetic is
-self-consistent. One did: team authority is implemented and tested but wired to nothing - though the
-client-originated write path that would make it dangerous is itself not built yet, which is why the severity
-is medium rather than high.
+The clock finding is the one that justifies the whole exercise: every unit test passed, the state format was
+correct, and the feature still could not be relied on, because the only thing that made it self-healing was
+missing. Two claims I expected to fail did not (save wire transfer, layout arithmetic); one did (`coop-auth`
+wired to nothing); and one failure was in a place no test was looking (the clock sender).

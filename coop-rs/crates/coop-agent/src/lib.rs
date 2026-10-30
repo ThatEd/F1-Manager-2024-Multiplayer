@@ -1809,6 +1809,33 @@ pub fn run(pid: u32, supervisor: &str) {
             }
         }
         ticks_without_fire = ticks_without_fire.saturating_add(1);
+
+        // Re-publish the pause state once a second, before the heartbeat.
+        //
+        // This is the difference between a correct protocol and a reliable one. `Msg::Clock` carries this
+        // player's *complete* reason set, and the gate on the far side replaces its copy wholesale - so a
+        // single lost frame is repaired by the next one. But the front-end only sends a clock frame from the
+        // `SimPauseChange` wrapper, i.e. when the player pauses or resumes, so without this there was nothing
+        // to repair it: one dropped frame left the host running while the client stayed stopped, for as long as
+        // the race lasted.
+        //
+        // Re-sending full state is what the protocol was designed for ("full state, not a delta: a lost
+        // 'unpause' would leave the world frozen with nothing to indicate why"). The cost is one small frame
+        // per second; the alternative is a desync that only shows up as "the world is stuck" with no evidence.
+        //
+        // Only while actually paused: an unpaused world sends nothing here, so the steady state is one frame
+        // per second and idle play is not paying for a redundant "not paused" every tick.
+        {
+            let reasons = clock_with(|c| c.reasons());
+            if !reasons.is_empty() {
+                let ids: Vec<u8> = reasons.iter().map(|r| *r as u8).collect();
+                // Ticks are not compared by the receiver for clocks (it replaces state), so the heartbeat
+                // count is enough to keep frames distinguishable in a log.
+                let frame = coord::clock_frame(&ids, ticks_without_fire);
+                queue_frame(frame);
+            }
+        }
+
         let frame = encode(&Msg::Agent { pid, rsm: rsm as u64, side: agent_side() });
         let mut lost = false;
         if let Some(s) = stream.as_mut() {

@@ -145,6 +145,12 @@ if shutil.which("node"):
     # was ever released. This extracts and runs the real `pickTeam` body, so a copy cannot drift from the source.
     suite("teams", ["node", "team_claim_test.js"], HEADLESS, lambda out: passed_count(out, 10))
 
+    # Do both machines agree the world is paused? The union rule is unit-tested in Rust, but the failure that
+    # matters is a *lost frame*: the front-end sends clock state only on SimPauseChange, so before the agent
+    # heartbeat re-published it, one dropped frame left the host running and the client stopped for the rest of
+    # the race. This suite models the gate against coordination.rs and asserts the repeat exists.
+    suite("clock", ["node", "clock_convergence_test.js"], HEADLESS, lambda out: passed_count(out, 16))
+
     # ---- JS: end-to-end against a real supervisor process ------------------------------------
     # Needs the built supervisor binary. `cargo build --release` produces it; the runner builds it
     # below rather than skipping, because this is the one suite that proves two peers actually
