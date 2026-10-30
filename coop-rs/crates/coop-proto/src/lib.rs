@@ -344,6 +344,8 @@ pub enum ProtoError {
     BadSide(u8),
     TrailingBytes(usize),
     BadCarCount(usize),
+    /// A declared frame length beyond [`MAX_FRAME`]. Refused rather than awaited.
+    BadLength(usize),
 }
 
 impl fmt::Display for ProtoError {
@@ -357,6 +359,10 @@ impl fmt::Display for ProtoError {
             ProtoError::BadSide(s) => write!(f, "unknown side {s}"),
             ProtoError::TrailingBytes(n) => write!(f, "{n} trailing byte(s) after the message"),
             ProtoError::BadCarCount(n) => write!(f, "expected {CAR_COUNT} cars, got {n}"),
+            ProtoError::BadLength(n) => write!(
+                f,
+                "peer claims a {n}-byte frame; the maximum this protocol allows is {MAX_FRAME}"
+            ),
         }
     }
 }
@@ -758,6 +764,16 @@ pub fn decode(frame: &[u8]) -> Result<Msg, ProtoError> {
     Ok(msg)
 }
 
+/// The largest frame this protocol can legitimately produce.
+///
+/// A session payload is chunked at 8 KiB, and the biggest single message is a 22-car snapshot (a few KiB), so
+/// 1 MiB is already two orders of magnitude of headroom. It exists because `next_frame` reads the length
+/// straight out of the header: a peer claiming `0xFFFFFFFF` (or simply a corrupt length field) makes the
+/// splitter wait for ~4 GiB, and callers that accumulate until a frame is complete - `coop-link`'s reader has
+/// no cap of its own - would grow their buffer until the process dies. That is a memory-exhaustion path
+/// reachable from the other machine, deliberate or not.
+pub const MAX_FRAME: usize = 1 << 20;
+
 /// Splits a byte stream into frames. Returns the frame length and consumed offset when complete.
 pub fn next_frame(buf: &[u8]) -> Result<Option<usize>, ProtoError> {
     if buf.len() < HEADER_LEN {
@@ -767,6 +783,12 @@ pub fn next_frame(buf: &[u8]) -> Result<Option<usize>, ProtoError> {
         return Err(ProtoError::BadMagic);
     }
     let len = u32::from_le_bytes([buf[6], buf[7], buf[8], buf[9]]) as usize;
+    // Refuse an impossible length immediately rather than waiting for bytes that will never arrive. Returning
+    // an error (instead of None) matters: callers treat an error as "resynchronise, drop the buffer", which is
+    // what recovers them, whereas None tells them to keep accumulating.
+    if len > MAX_FRAME {
+        return Err(ProtoError::BadLength(len));
+    }
     let total = HEADER_LEN + len;
     if buf.len() < total {
         return Ok(None);
@@ -1232,5 +1254,44 @@ mod tests {
         let frame = encode(&msg);
         let cut = &frame[..frame.len() - 2];
         assert!(decode(cut).is_err());
+    }
+
+    fn header_with_len(len: u32) -> Vec<u8> {
+        let mut frame = Vec::new();
+        frame.extend_from_slice(&MAGIC);
+        frame.extend_from_slice(&VERSION.to_le_bytes());
+        frame.extend_from_slice(&len.to_le_bytes());
+        frame.extend_from_slice(&0u32.to_le_bytes());
+        frame
+    }
+
+    #[test]
+    fn next_frame_refuses_an_impossible_declared_length() {
+        // A peer, or a corrupt header, claiming ~4 GiB. Before the cap the splitter answered "need more
+        // bytes", so every caller kept accumulating until the process died - `coop-link`'s reader has no cap
+        // of its own. It must be an error, because callers resynchronise on error and accumulate on None.
+        assert_eq!(next_frame(&header_with_len(u32::MAX)), Err(ProtoError::BadLength(u32::MAX as usize)));
+
+        // Just over the cap is refused too, so the boundary is exactly MAX_FRAME and not something looser.
+        assert_eq!(
+            next_frame(&header_with_len(MAX_FRAME as u32 + 1)),
+            Err(ProtoError::BadLength(MAX_FRAME + 1))
+        );
+
+        // A frame exactly at the cap is still awaited, not refused: the limit must not reject real traffic.
+        assert_eq!(next_frame(&header_with_len(MAX_FRAME as u32)), Ok(None));
+    }
+
+    #[test]
+    fn a_real_snapshot_is_far_inside_the_cap() {
+        // Guards against tightening MAX_FRAME until it truncates legitimate traffic.
+        let cars: Vec<Car> = (0..CAR_COUNT as u8).map(sample_car).collect();
+        let frame = encode(&Msg::Snapshot { tick: 1, sim_time: 0.0, race_time: 0.0, cars });
+        assert!(
+            frame.len() < MAX_FRAME,
+            "a full snapshot is {} bytes, cap is {MAX_FRAME}",
+            frame.len()
+        );
+        assert_eq!(next_frame(&frame), Ok(Some(frame.len())));
     }
 }

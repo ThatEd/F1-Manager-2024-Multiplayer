@@ -498,6 +498,33 @@ start delay - and reverting either fails the suite.
 
 ---
 
+## 16. Framing: an unbounded length, and a resync that never resynced
+
+Two bugs in the receive path, found by asking what a *malformed* frame does rather than a well-formed one.
+
+**A declared frame length was trusted without limit.** `next_frame` read the length from the header and waited
+for that many bytes (`coop-proto/src/lib.rs:769`). A peer - or one corrupt length field - claiming `0xFFFFFFFF`
+made the splitter answer "need more bytes" for ~4 GiB. The agent tolerated this because it caps its own buffer at
+1 MiB and clears beyond it (`coop-agent/src/lib.rs:599`); **`coop-link` has no cap at all**, so its
+`Vec::extend_from_slice` grew without bound. That is memory exhaustion reachable from the other machine, whether
+deliberate or a bit flip. `MAX_FRAME` (1 MiB) now refuses an impossible length up front - and returns an
+*error* rather than `None`, because callers resynchronise on error and accumulate on `None`.
+
+**The resynchronisation path never resynchronised.** `split_frame` documented that on a corrupt header
+"dropping the buffer is the only recovery", then returned an empty frame for the caller to `drain(..0)` - which
+removes nothing. The corrupt header stayed at the front of the buffer forever, and every subsequent call failed
+on the same bytes. This was *latent* while an oversized length simply waited; combined with the new cap it would
+have become a hot loop that spins on the same header and never reads another byte. `split_frame` now returns
+`Result`, and the reader clears the buffer and reports how much it dropped.
+
+The second bug is the more instructive one: the comment described the correct behaviour, the code did something
+else, and nothing exercised the corrupt-header path because every test fed it well-formed frames. It only
+surfaced by asking what the *failure* path does - and the first fix would have converted a slow failure into a
+fast one. Tested by feeding bad magic and an over-cap length, and by confirming a genuinely partial frame is
+still treated as "need more" so normal traffic is unaffected.
+
+---
+
 ## Summary of what this audit changed
 
 | finding | severity | state |

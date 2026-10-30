@@ -466,9 +466,26 @@ impl Frames {
             // A frame is self-delimiting: header carries its length, and `decode` rejects short input
             // rather than mis-parsing, so try to decode as soon as we have anything.
             if !self.buf.is_empty() {
-                if let Some(frame) = split_frame(&self.buf) {
-                    self.buf.drain(..frame.len());
-                    return Ok(frame);
+                match split_frame(&self.buf) {
+                    Ok(Some(frame)) => {
+                        self.buf.drain(..frame.len());
+                        return Ok(frame);
+                    }
+                    Ok(None) => {}
+                    Err(why) => {
+                        // Resynchronise by discarding, then keep reading. The header at the front is
+                        // unframeable, so no amount of waiting will make these bytes into a message, and
+                        // keeping them means every later call fails on the same header - a hot spin that
+                        // never reads a new frame. Clearing is what actually recovers.
+                        //
+                        // This used to return an empty frame instead, and the caller's `drain(..0)`
+                        // removed nothing, so the buffer was never dropped despite the comment saying so.
+                        // That was invisible while an oversized length simply waited for bytes it would
+                        // never get; with the length cap in `next_frame` it became a busy loop.
+                        let dropped = self.buf.len();
+                        self.buf.clear();
+                        return Err(format!("{why}; dropped {dropped} byte(s) to resynchronise"));
+                    }
                 }
             }
             let n = self.stream.read(&mut chunk).map_err(|e| format!("read: {e}"))?;
@@ -480,19 +497,18 @@ impl Frames {
     }
 }
 
-/// Pulls one complete frame out of `buf`, or None if more bytes are needed.
+/// Pulls one complete frame out of `buf`.
 ///
-/// Uses `coop-proto`'s own splitter rather than duplicating the header format, so a partial frame
-/// stays in the buffer instead of being mis-parsed as a short one.
-fn split_frame(buf: &[u8]) -> Option<Vec<u8>> {
+/// `Ok(Some)` is a frame, `Ok(None)` means more bytes are needed, and `Err` means the bytes cannot be framed
+/// at all - a decision the caller must act on, because no future read makes an unframeable header valid.
+///
+/// Uses `coop-proto`'s own splitter rather than duplicating the header format, so a partial frame stays in the
+/// buffer instead of being mis-parsed as a short one.
+fn split_frame(buf: &[u8]) -> Result<Option<Vec<u8>>, String> {
     match coop_proto::next_frame(buf) {
-        Ok(Some(total)) if buf.len() >= total => Some(buf[..total].to_vec()),
-        Ok(_) => None,
-        Err(_) => {
-            // A corrupt header cannot be framed; dropping the buffer is the only recovery, and the
-            // caller will report the gap rather than pretending it decoded.
-            buf.last().map(|_| Vec::new())
-        }
+        Ok(Some(total)) if buf.len() >= total => Ok(Some(buf[..total].to_vec())),
+        Ok(_) => Ok(None),
+        Err(e) => Err(format!("unframeable bytes ({e})")),
     }
 }
 
@@ -1456,5 +1472,34 @@ mod guard_tests {
         assert!(!f.failed(), "a success must reset the consecutive count");
         assert!(!f.failed());
         assert!(f.failed(), "and the limit must still be reachable afterwards");
+    }
+
+    /// Unframeable bytes must be reported as an error, not as an empty frame.
+    ///
+    /// The old splitter returned `Some(vec![])` for a corrupt header, and the reader's `drain(..0)` removed
+    /// nothing - so the buffer was never dropped even though the comment said dropping was the only recovery.
+    /// Every later call then failed on the same header. That was masked while an oversized length merely
+    /// waited for bytes; once `next_frame` capped the length it became a busy loop that never read again.
+    #[test]
+    fn unframeable_bytes_are_an_error_not_an_empty_frame() {
+        // Bad magic: cannot be framed, ever.
+        let garbage = vec![0xDE, 0xAD, 0xBE, 0xEF, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0];
+        match split_frame(&garbage) {
+            Err(msg) => assert!(msg.contains("unframeable"), "got {msg:?}"),
+            Ok(other) => panic!("garbage must not be framed, got {other:?}"),
+        }
+
+        // A declared length past the cap is equally unframeable, and must not be answered with "need more".
+        let mut huge = Vec::new();
+        huge.extend_from_slice(&coop_proto::MAGIC);
+        huge.extend_from_slice(&coop_proto::VERSION.to_le_bytes());
+        huge.extend_from_slice(&u32::MAX.to_le_bytes());
+        huge.extend_from_slice(&0u32.to_le_bytes());
+        assert!(split_frame(&huge).is_err(), "an impossible length must not be awaited");
+
+        // A genuinely partial frame is still "need more bytes", not an error - otherwise normal traffic breaks.
+        let whole = coop_proto::encode(&coop_proto::Msg::Bye);
+        assert!(matches!(split_frame(&whole[..whole.len() - 1]), Ok(None)));
+        assert!(matches!(split_frame(&whole), Ok(Some(_))));
     }
 }
