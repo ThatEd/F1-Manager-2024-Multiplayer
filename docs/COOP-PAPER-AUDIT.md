@@ -157,10 +157,16 @@ guards are the mitigation; they catch a moved function, not a moved field.
 
 ## 6. What is still unknown, and cannot be settled without the game
 
-1. Whether the offsets in `layout.rs` still match the installed build's `RaceSimManager`.
+1. ~~Whether the offsets in `layout.rs` still match the installed build's `RaceSimManager`.~~
+   **Partly settled without the game**: `SIMULATE_RVA` is verified against this exe (§18). The *field*
+   offsets index a runtime object and still need a live read.
 2. Whether a lobby actually appears and is joinable (needs a live Steam client).
 3. Whether the UE4SS crash recurs with UE4SS disabled - `tools/ue4ss_isolation.py` answers that in one launch.
 4. Whether the racesim hook fires in a real session (it has never been observed firing in a race).
+5. **Whether `Raw StageProceed` actually starts a session.** The name is in the engine and absent from the
+   UI (§18), which makes it the best candidate lever - but a name in a string table does not prove the
+   Gameface binding accepts it as a trigger, nor that the handler advances the stage rather than doing
+   bookkeeping. One launch with a race weekend loaded would settle it.
 
 ---
 
@@ -548,6 +554,67 @@ Fixed in two ways, both of which matter:
 
 This is the same class of finding as §12 and §16: the information needed to explain the failure existed and was
 discarded one layer before anyone could see it.
+
+---
+
+## 18. The session-flow lever: two engine events the UI has no button for
+
+`README.md` claims the *UI* has no event that starts a race, but that the exe contains session-flow commands
+the UI never sends - `StageProceed` and `TravelToRaceWeekend` - and that they are untried. That claim is
+checkable from the exe alone, so I checked it rather than carrying it as an assumption.
+
+**Both strings are present at exactly the documented offsets** (ASCII, this build):
+
+```
+0x05FA7C98  StageProceed
+0x05FCAC28  TravelToRaceWeekend
+```
+
+and they sit inside a contiguous native **event-name table**, which is what makes the claim strong rather
+than a coincidence of matching text:
+
+```
+0x05FA7C88  RaceViewChanged
+0x05FA7C98  StageProceed
+0x05FA7CA8  SessionOverviewClosed
+0x05FA7CC0  AdvanceToNextStage
+0x05FA7CD8  PreSessionClosed
+0x05FA7CF0  AnalyticsClosed
+0x05FA7D00  ConstructorStandingsClosed
+0x05FA7D20  PostRaceSummaryClosed
+0x05FA7D38  PostRace
+```
+
+These are the same strings the UI *does* send - `PreSessionClosed`, `SessionOverviewClosed`,
+`AdvanceToNextStage`, `PostRaceSummaryClosed` all appear in the export's JS. So this is one enumeration of
+engine event names, not a random pool of text, and `StageProceed` is a member of it.
+
+**The discriminating measurement:** of the nine names in that table, the five the UI uses appear in the
+Gameface JS (7, 2, 1, 2, 1 hits respectively). `StageProceed` and `TravelToRaceWeekend` have **zero** hits:
+
+```
+StageProceed               js_hits=0
+TravelToRaceWeekend        js_hits=0
+AdvanceToNextStage         js_hits=7
+SessionOverviewClosed      js_hits=1
+PreSessionClosed           js_hits=2
+AnalyticsClosed            js_hits=1
+ConstructorStandingsClosed js_hits=1
+PostRaceSummaryClosed      js_hits=2
+```
+
+That is the README's claim, independently confirmed: these two are engine-side session flow with no control
+bound to them anywhere in the UI, which is exactly why clicking everything on the pre-session screen never
+started the sim. It also means the bridge's `Raw` command can dispatch events the shipped UI has no button
+for - a capability the *game's own interface* does not expose.
+
+**What this does not prove.** A name in the table does not establish that the Gameface binding accepts it via
+`engine.trigger`, nor that its handler *advances the stage* rather than doing bookkeeping. `TravelToRaceWeekend`
+is in a different section (`0x5FCAC28`), so it is a separate candidate, not part of the same block. Both need
+one launch with a race weekend loaded to settle - now item 5 in §6.
+
+This is a genuine advance on "we could not find any Gameface event that starts the sim": the export was the
+wrong place to look for it, and the exe says which two names to try.
 
 ---
 

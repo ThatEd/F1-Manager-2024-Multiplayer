@@ -164,6 +164,15 @@ if shutil.which("node"):
     # re-derived before the mod is used - a stale target patches unrelated code.
     suite("offsets", [sys.executable, "-I", os.path.join(TOOLS, "verify_offsets.py")],
           HERE, lambda out: ("OK: nothing checkable is wrong" in out) or out.strip().startswith("SKIP"))
+
+    # Is `engine.trigger` still the only way the UI reaches the engine, and are the engine-only session-flow
+    # names still findable? `StageProceed` and `TravelToRaceWeekend` are in the exe's event table with zero UI
+    # references - which makes them the candidates for starting a session, and means `Raw` can reach events the
+    # shipped interface has no button for. This asserts they are still there, so a patch that renames them is
+    # noticed here rather than during a race weekend.
+    suite("gaps", [sys.executable, "-I", os.path.join(TOOLS, "ui_event_gap.py")],
+          HERE, lambda out: ("IN THE ENGINE, NEVER SENT BY THE UI" in out and "StageProceed" in out)
+          or out.strip().startswith("SKIP"))
     # One player must not be able to take every team. Reported as "player 1 being able to take every team and
     # locking them", caused by comparing a string object key against a number - always unequal, so no claim
     # was ever released. This extracts and runs the real `pickTeam` body, so a copy cannot drift from the source.
