@@ -153,6 +153,13 @@ if shutil.which("node"):
                     "--game-exe", os.path.join(game, "F1Manager24", "Binaries", "Win64",
                                                "F1Manager24.exe")],
           HERE, lambda out: "every imported name is exported" in out or out.strip().startswith("SKIP"))
+
+    # Are the hardcoded RVAs still right for the installed exe? `SIMULATE_RVA` can be checked with no game
+    # running: the bytes at that RVA in the file are compared against the prologue the running game was
+    # observed to hold. A mismatch means a patch moved the function and every offset in layout.rs must be
+    # re-derived before the mod is used - a stale target patches unrelated code.
+    suite("offsets", [sys.executable, "-I", os.path.join(TOOLS, "verify_offsets.py")],
+          HERE, lambda out: ("OK: nothing checkable is wrong" in out) or out.strip().startswith("SKIP"))
     # One player must not be able to take every team. Reported as "player 1 being able to take every team and
     # locking them", caused by comparing a string object key against a number - always unequal, so no claim
     # was ever released. This extracts and runs the real `pickTeam` body, so a copy cannot drift from the source.

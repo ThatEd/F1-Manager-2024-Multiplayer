@@ -261,21 +261,83 @@ it runs on the **game thread inside the sim call**, and a slice index out of ran
 
 ---
 
+## 10. Team retarget — the persistence step the design depends on is not written
+
+`TEAM-RETARGET.md` makes a single row the basis of Versus: `Player.TeamID` is "one integer on one row", and the
+whole management UI scopes itself off `playerTeamID`, so changing it gives the client team B's entire command
+surface with no per-team allowlist. That reasoning is sound and I did not find a flaw in it.
+
+Its **implementation plan** has a gap. The documented sequence is:
+
+> 1. **Edit then reload.** Do `UPDATE`, then `LoadGame` again from the front-end. The engine re-reads `Player` on
+>    load and republishes. Costs one extra load, uses only proven mechanisms. **This is the recommended first
+>    implementation.**
+
+`LoadGame` re-reads the save **from disk** - documented elsewhere in this tree, and the only thing consistent
+with a save/load screen reading `.sav` files. So reloading discards an `UPDATE` that only ever landed in the
+live in-memory SQLite database. `coop-retarget` does exactly that and stops:
+
+```rust
+match db.sql(&script) { Ok(_) => println!("  applied"), ... }   // BEGIN; UPDATE Player ...; COMMIT;
+```
+
+`COMMIT` here commits to the runtime database inside the game process. **Searching the whole tree for anything
+that writes a save finds nothing**: no save call, no serialisation, no file write of a `.sav`. So as written,
+step 1 of the recommended plan cannot work - the edit is lost on the reload it uses to take effect.
+
+**What the evidence says should happen instead.** The game does autosave, so a DB edit is *probably* captured on
+the next save cycle rather than needing a manual one:
+
+```
+autosave.sav        3172783  2026-10-30 05:24:26
+customisation.sav   2086025  2026-10-30 05:24:15
+```
+
+Two files rewritten eleven seconds apart, today - the engine writes them itself. And every `.sav` in the folder
+uses the same `GVAS` container with the same version header, `customisation.sav` and `player.sav` included, so
+autosave and manual saves are not different formats that could capture different state. **verified** (header
+bytes and timestamps).
+
+So the correct sequence is likely: `UPDATE` → let the engine autosave (or force it) → reload. That is a *later*
+reload than the design assumes, and it is unverified: whether the autosave is triggered by the calendar
+advancing, by leaving a screen, or on an interval is **unknown**, and whether it captures a foreign `UPDATE`
+made behind the engine's back is **unknown**.
+
+**This matters more than it looks,** because the same question governs every other DB edit the mod makes -
+contract claims, retargeting, anything through `coop-sql`. If a runtime `UPDATE` is never persisted, then all
+of it is session-scoped, and the two peers' databases diverge from the save they came from.
+
+**What to do first when the game is available:** `UPDATE Player SET TeamID = <other>`, note the clock, wait for
+the next `autosave.sav` mtime to change, then read the file back after a reload. That is one session and it
+settles persistence for every DB write in the design. Until then, `TEAM-RETARGET.md`'s step 1 should not be
+described as "uses only proven mechanisms" - the reload it relies on is the step that undoes it.
+
+---
+
 ## Summary of what this audit changed
 
 | finding | severity | state |
 |---|---|---|
 | a lost clock frame desynced the pause state permanently, because nothing re-published it | **high** | **fixed**: the agent heartbeat re-publishes while paused; guarded by an 18-assertion suite |
 | `coop-auth` is complete and never called, while comments claim it enforces team rules | **medium** - nothing broken today, but the guarantee was absent | **fixed**: gated at both write chokepoints (`LiveDb::sql`, `LiveDb::write_car`), with wiring tests |
+| **team retarget's "edit then reload" loses the edit**: `LoadGame` re-reads from disk, and nothing persists a runtime `UPDATE` | **high** - the recommended Versus implementation cannot work as written | recorded; the fix is a persistence step, and the first experiment is specified in §10 |
 | `Mailbox::drain` indexed the shared buffer directly on the game thread | low (unreachable today) but the failure mode is the whole process | **fixed**: `get(..)` with a zero-entry fallback |
 | save "opaque / unreadable" was imprecise: container is Unreal's, payload is compressed | low | corrected in this document and in `tools/save_format.py` |
+| `SIMULATE_RVA` still points at the right function in the installed exe | - | **verified statically**: file bytes at the RVA match the live-read prologue exactly (`tools/verify_offsets.py`) |
 | save transfer, wire framing, layout arithmetic, session payload, tyre guards, entry widths, contract-claim loss behaviour | **no defects found** | verified |
 
-Three of the four findings are fixed; the fourth is a documentation correction. The clock finding is the one
-that justifies the whole exercise: every unit test passed, the state format was correct, and the feature still
-could not be relied on, because the only thing that made it self-healing was missing. Two claims I expected to
-fail did not (save wire transfer, layout arithmetic); one did (`coop-auth` wired to nothing); and one failure
-was in a place no test was looking (the clock sender).
+Four findings, four fixed or corrected, one new and open. The clock finding justifies the whole exercise: every
+unit test passed, the state format was correct, and the feature still could not be relied on. Two claims I
+expected to fail did not (save wire transfer, layout arithmetic); one did (`coop-auth` wired to nothing); and
+one failure was in a place no test was looking (the clock sender).
 
-What remains open needs the game running - see §6 - plus the `write_car` team mapping assumption in §2, which
-only a session can confirm.
+The retarget/persistence finding is the one that changes a plan rather than fixing a bug: a documented
+"recommended implementation" rests on a reload that discards the change it is meant to apply.
+
+What remains genuinely open, and needs the game:
+
+- whether a runtime SQL `UPDATE` is captured by the engine's autosave (§10) - **the first experiment**;
+- the field offsets inside the runtime object, which no file can confirm;
+- whether a lobby is joinable;
+- whether the UE4SS crash recurs with UE4SS disabled (`tools/ue4ss_isolation.py`);
+- whether the `write_car` team mapping in §2 is right.
