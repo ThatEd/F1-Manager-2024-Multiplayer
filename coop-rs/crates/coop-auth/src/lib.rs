@@ -7,6 +7,10 @@
 //!   SharedTeam   two players, one team     - the garage is split by car, the team by role
 //!   Versus       two players, two teams    - each owns a whole team
 //!   CoopCareer   two teams, one world      - versus plus a shared calendar
+//!
+//! `CoopCareer` is still a valid `Mode` for the row rules, but **the UI no longer offers it** (`lobby.js`:
+//! "Co-op career was removed: it is the same shape as Versus"), and `from_text` no longer selects it. The UI
+//! offers `shared-team` and `versus` only, so those are the two that should be reachable from a config file.
 //! ```
 //!
 //! ## Why the split is possible at all
@@ -62,7 +66,12 @@ impl Mode {
     pub fn from_text(text: &str) -> Mode {
         match text.trim().to_ascii_lowercase().replace('_', "-").as_str() {
             "shared-team" | "sharedteam" | "shared" | "team" => Mode::SharedTeam,
-            "coop-career" | "coopcareer" | "career" | "coop" => Mode::CoopCareer,
+            // The UI offers two modes and removed `CoopCareer` (`lobby.js`: "it is the same shape as Versus").
+            // These aliases used to map to it, which meant the file could name a mode the player cannot select -
+            // and one whose row rules were never exercised, because nothing writes "coop-career" any more. They
+            // now resolve to `Versus`, whose rule for every scope is a strict subset, so a stale file cannot
+            // grant more than Versus would.
+            "coop-career" | "coopcareer" | "career" | "coop" => Mode::Versus,
             _ => Mode::Versus,
         }
     }
@@ -527,7 +536,8 @@ mod tests {
     fn mode_parsing_defaults_to_the_most_restricted_useful_mode() {
         assert_eq!(Mode::from_text("shared-team"), Mode::SharedTeam);
         assert_eq!(Mode::from_text("SharedTeam"), Mode::SharedTeam);
-        assert_eq!(Mode::from_text("coop-career"), Mode::CoopCareer);
+        assert_eq!(Mode::from_text("coop-career"), Mode::Versus,
+            "the UI removed this mode, so a stale file must not select it");
         assert_eq!(Mode::from_text("versus"), Mode::Versus);
         // Unknown must not become the loosest mode.
         assert_eq!(Mode::from_text("nonsense"), Mode::Versus);

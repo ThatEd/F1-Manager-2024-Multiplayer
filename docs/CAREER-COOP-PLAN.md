@@ -92,7 +92,7 @@ This layer is the smallest and the best understood. The rule is proven and live-
 > leaves a black screen with the process alive ([LOBBY-GATE.md](LOBBY-GATE.md)).
 
 The co-op consequence, already in [LOBBY-GATE.md](LOBBY-GATE.md) and now enforced twice in code by the
-headless client ([tools/headless/README.md](HEADLESS-HARNESS.md)):
+headless client ([tools/headless/README.md](tools/headless/README.md)):
 
 1. every client returns to the front-end (`QuitGame`, wired as bridge `menu`);
 2. the host pushes the save;
@@ -119,13 +119,13 @@ This is the 76%, and it is where the design effort belongs.
 - **Live DB:** **in memory**, no file, no pager image that maps to it. Reachable **only** through the
   game's own `sqlite3_exec` at RVA `0x156D300`, with the `sqlite3*` found by signature and validated
   by `db+0x20 == db+0x2A0`, `*(i32*)(db+0x28) == 2`, and `pager->zName == ":memory:"`
-  ([NOTES.md](../NOTES.md) ~1908).
+  ([NOTES.md](NOTES.md) ~1908).
 - **Proven capable of:** arbitrary `SELECT`, idempotent transactions, and real writes —
   `coop-sql --swap-contracts 8 83` produced a verifiable swap. A bad statement
   (`INSERT INTO Board_TeamRating` with an unknown `SeasonID`) returned **SQLite error 19 and the game
   was fine** (~1972), which is evidence the write path fails safely.
 - **Not in the save:** the `.sav` is opaque compressed data (entropy 7.99–8.00, no `SQLite format 3`,
-  no `CREATE TABLE`) — [NOTES.md](../NOTES.md) ~1656. So you cannot diff two saves to sync a career; you
+  no `CREATE TABLE`) — [NOTES.md](NOTES.md) ~1656. So you cannot diff two saves to sync a career; you
   must go through the live DB.
 
 ### 4.2 Why this layer is *better* for co-op than the sim
@@ -194,6 +194,16 @@ want to act. Three coherent options:
 and the only shared rows are the ones both players legitimately read (`RacesPS`, `StandingsPS`,
 `CalendarPS`) — and those are engine-computed, so only the host's copy is authoritative.
 
+> **Correction, added after auditing the code against this page.** Model 2 as written above describes rows
+> being owned and therefore persisted - but with one shared in-memory DB and **no statement replication**,
+> a client's edits change only the client's process. The host never learns of them, and whichever player
+> saves last writes their DB over the `.sav`, silently discarding the other's management work. §4.3 below
+> ("replicate transactions, not state") is the missing layer, and it is not implemented: there is no
+> statement log, no SQL message type, and no capture hook on the game's own prepared statements. Until it
+> exists, "each client owns its own team's rows" means "each client can edit its own team, and only the
+> host's edits survive". See `COOP-PAPER-AUDIT.md` §20 for the full argument and the concrete next step.
+> The model is still the right target; it is the mechanism that is absent.
+
 ---
 
 ## 5. What "the same principle" must NOT mean
@@ -225,7 +235,7 @@ and the save does not carry RNG; `NOTES.md` ~1908 notes the DB is in memory with
 whether the DB handle is stable across the career→race→career transition, or is rebuilt. **This is the
 single most important unknown for a career co-op design** — if the handle moves, a client must
 re-discover it after every race, exactly as the sim's `RaceSimManager` address was found to move
-between sessions ([NOTES.md](../NOTES.md) ~1513: "the live address **moves between sessions**
+between sessions ([NOTES.md](NOTES.md) ~1513: "the live address **moves between sessions**
 (`0x1750E0000` earlier, `0x173530000` now), so caching is only ever a cache").
 
 ---
@@ -285,7 +295,7 @@ path, and fails safely — so it is both the bigger job and the cheaper one.
    live DB exactly matches (26 tables, same columns) is not established. The 336 migrations make
    drift plausible.
 5. **No live tests.** Nothing in this document was executed. Every mechanism here is argued from
-   evidence already recorded in [NOTES.md](../NOTES.md), not re-measured.
+   evidence already recorded in [NOTES.md](NOTES.md), not re-measured.
 6. **`QuitGame` still untested** — the one L4 link, unchanged since [LOBBY-GATE.md](LOBBY-GATE.md).
 
 ---

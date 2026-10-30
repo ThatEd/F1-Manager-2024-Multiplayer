@@ -658,6 +658,102 @@ papered over - and the one-launch check is to see which folder gains an autosave
 
 ---
 
+## 20. One room or two? The career layer is designed and not built
+
+The question put to me was whether co-op "works on paper through every format". Asking it precisely - *what state
+actually reaches the other machine?* - gave a sharper answer than another pass over encoders, and it is the most
+important thing in this document.
+
+### What the wire carries
+
+`coop-proto`'s `Msg` has 11 variants:
+
+| message | carries |
+|---|---|
+| `Hello`, `Agent` | handshake, role, sim pointer |
+| `Snapshot` | 22 cars' positions and state (race only) |
+| `Clock` | pause reasons + tick |
+| `Contract` | a contract-claim request for a person on a day |
+| `Vote` | a regulation vote |
+| `TeamClaim` | which team a player took |
+| `SessionOffer` / `SessionChunk` / `SessionReady` | the save file, chunked |
+| `Bye` | refusal |
+
+**Not one of them carries management state.** No transfers, no car development, no finances, no staff, no
+sponsors. `observe.js` says so in its own header: it turns what the player pressed into `Clock`, `Contract` and
+`Vote` frames - coordination, not replication.
+
+### The career is a snapshot, and the snapshot is the host's
+
+`LOBBY-GATE.md:101-115` states the chosen model plainly: *"the host's career is the world"*.
+
+1. Host plays, saves.
+2. `UPDATE Player SET TeamID = <client team>`.
+3. Host ships the save to the client.
+4. Both press Continue, then advance together through the gate.
+
+So both peers run **the same career DB**, shipped once and loaded into memory (§10: there is no `.sqlite` on
+disk; the DB lives in the compressed `.sav` payload). The clock gate makes them advance together. That part is
+coherent and implemented.
+
+### What follows, and it is a real gap
+
+If both run the same in-memory DB and nothing replicates transactions, then:
+
+* The client **can** act on their own team - their `TeamID` was retargeted, so the whole management UI scopes to
+  them, and `coop-auth` permits the writes. Their clicks genuinely change their own process.
+* The **host never sees those changes.** The host's DB was never told about them.
+* At the save boundary it is worse than "not shared": whoever saves writes *their* DB to the `.sav`, and the other
+  player's entire month of work is **silently discarded**. There is no reconciliation, so the career can only ever
+  hold one player's management history.
+
+That is not a bug in an encoder - it is a missing layer. And it is precisely the layer `CAREER-COOP-PLAN.md`
+§4.3 designs:
+
+> **Do not ship table snapshots.** ... Ship the *statements*.
+> `host: captures the SQL the game prepared → log { seq, tick, table, pk, sql, hash }` → client applies the same SQL
+
+**That is not implemented anywhere.** I checked all eight crates (`coop-proto`, `coop-auth`, `coop-supervisor`,
+`coop-mem`, `coop-agent`, `coop-inject`, `coop-link`, `coop-proxy`): there is no statement log, no SQL message
+type, no `sqlite3_exec` capture hook, and no conflict resolution. `LiveDb::sql` is an *out-of-band* injector - the
+mod composing its own SQL and pushing it through `sqlite3_exec` in the target - which is the opposite direction:
+it sends statements *we* wrote, not statements *the game* wrote.
+
+### The two modes in the UI, judged against that
+
+`lobby.js:355-361` offers exactly two:
+
+| mode | what the UI promises | does it work on paper? |
+|---|---|---|
+| **Shared team** | *"Two players, one team - the garage is split by car"* | **Partly.** Shared clock, shared calendar, shared race, no contract collision, per-car ownership enforced by `coop-auth`. **But** the two players' setup/development work does not cross, and only one player's version survives a save. |
+| **Versus** | *"A team each, racing the other player. Shared calendar and results, your own garage."* | **No, not as "your own garage".** "Your own garage" means each player manages their own team - which is statement replication. It isn't built. |
+
+And a contradiction worth naming: `coop-auth` implements a **third** mode, `CoopCareer` (`lib.rs:45`), which the UI
+deliberately removed (`lobby.js:365`: *"Co-op career was removed: it is the same shape as Versus"*) - while still
+accepting `"coop"`, `"career"` and `"coopcareer"` as its config strings (`lib.rs:65`). Meanwhile
+`CAREER-COOP-PLAN.md` *recommends* model 2, "split-team, each client owns its own team's rows" - which with one DB
+and no replication means "owning rows" amounts to "only the host's edits persist". The recommendation describes
+the mode that cannot work yet.
+
+### So, honestly
+
+**Co-op does not work on paper for a full career, and the gap is one named, designed, unbuilt layer.** What works is:
+
+* two players in the same career, same clock, same calendar, same race weekend;
+* car positions in a live race;
+* contract and vote arbitration so two players do not collide;
+* team ownership so the picker greys out what is taken.
+
+What does not: **two players' management history coexisting in one career.** That needs the statement log in
+§4.3, plus a decision on conflict resolution for rows both players legitimately touch (`RacesPS`, `StandingsPS`,
+`CalendarPS` are engine-computed, so only the host's copy is authoritative - which is the easy half).
+
+**The next thing to build is not another encoder.** It is `Msg::Stmt` plus a capture hook on `sqlite3_exec`'s
+`prepare` path, or an explicit, documented acceptance that only the host's career edits count - in which case the
+UI should stop promising "your own garage" in Versus, because it cannot deliver it.
+
+---
+
 ## Summary of what this audit changed
 
 | finding | severity | state |
@@ -674,6 +770,7 @@ papered over - and the one-launch check is to see which folder gains an autosave
 | **the resync path never resynced**: `split_frame` returned an empty frame that `drain(..0)` removed nothing of | medium - a corrupt header poisoned the stream forever; with the length cap it would have become a hot loop | **fixed**: `split_frame` returns `Result`, the reader clears and reports the drop |
 | a live-server test had a fixed 12 s deadline that starved under load | low - but a red result that may be noise trains people to ignore red | **fixed**: 60 s, overridable, fails fast if the server exits, and prints its output |
 | **`coop-link` wrote received saves to a hardcoded `SaveGames`**, while the game keeps one folder per profile | **high on another machine** - the transfer reports success and the save lands where the game never looks | **fixed**: picks the folder whose newest `.sav` is newest; tested on a synthetic layout and against the real one |
+| **the career layer is designed and not built**: nothing on the wire carries management state, so both players edit one DB and only the host's edits survive a save | **critical for the stated goal** - "a full career together" is not achievable as built, and Versus advertises a garage it cannot provide | recorded in §20 with the concrete next step (`Msg::Stmt` + a `prepare`-path capture), and a recommendation to stop promising it in the UI until it exists |
 | `Mailbox::drain` indexed the shared buffer directly on the game thread | low (unreachable today) but the failure mode is the whole process | **fixed**: `get(..)` with a zero-entry fallback |
 | save "opaque / unreadable" was imprecise: container is Unreal's, payload is compressed | low | corrected in this document and in `tools/save_format.py` |
 | `SIMULATE_RVA` still points at the right function in the installed exe | - | **verified statically**: file bytes at the RVA match the live-read prologue exactly (`tools/verify_offsets.py`) |
