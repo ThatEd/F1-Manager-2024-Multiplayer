@@ -177,6 +177,39 @@ Removing the re-publish fails one (17/18), which is the check that matters.
 
 ---
 
+## 8. Contract claims — a lost claim fails *safe*, and that matters
+
+The same "who retries?" question as §7, with a different and much better answer.
+
+`observe.js` emits a contract frame from `OnSubmitContractOffer` (a claim), `OnConfirmStaffContract` (the
+signing) and `OnCancelStaffContract`/`OnFailedStaffContract` (releases). Each is an event-driven single send -
+`bridge.js:672` posts it once and never repeats. **verified.**
+
+If a **claim** frame is lost, the supervisor never records it, so it cannot refuse the other player's claim
+either: both players negotiate with the same person. The loser finds out at *confirmation* time, when the
+supervisor sees the `confirm` and one of them is refused. That is a worse experience than being refused up
+front, but it is **safe** - it cannot silently produce two signings.
+
+If a **release** frame is lost, the claim stays held and the other player is refused a person who is actually
+free. Annoying, self-limiting (the claim expires when the day rolls or the offer is resolved), and it errs
+towards refusing rather than duplicating.
+
+If a **signing** frame is lost, the ledger does not learn about the signing. The danger would be the other
+player signing the same person the same day - but the game itself refuses that, because both peers are running
+the same career and the signing already happened in the shared save. The supervisor's ledger is a *second* line
+of defence, not the only one.
+
+**Verdict: no fix needed, and deliberately not the same treatment as the clock.** Re-sending a claim is not
+idempotent in the way re-sending full pause state is: "claim person 9" repeated after the claim already won is
+harmless, but "confirm person 9" repeated after a *refusal* would keep re-presenting a decision that has been
+made. The clock is full state and self-repairing by construction; a claim is an event with a lifecycle. Adding
+retries here would be complexity in exchange for a better error message, and it risks re-opening settled
+decisions - the opposite trade from §7, where the retry was free.
+
+This is recorded rather than fixed so the asymmetry is a decision, not an oversight.
+
+---
+
 ## Summary of what this audit changed
 
 | finding | severity | state |
