@@ -325,6 +325,25 @@
         return true;
     }
 
+    // The same rule again, applied to the *event name* instead of the command word.
+    //
+    // `allowedFor` above matches on the command a person typed, and `Raw` reaches `engine.trigger` with an
+    // arbitrary name that it resolves afterwards - so `Raw LoadGame autosave` from RaceWeekend.html passed
+    // the command check (cmd was 'raw', which is allowed everywhere) and fired the one event documented to
+    // black-screen the process. A guard on the spelling of a command is not a guard on what gets dispatched.
+    //
+    // Derived from LOAD_FROM/MENU_FROM rather than restated, so the two cannot drift apart. Both halves are
+    // needed: the command check refuses early with the clearer message that names the page, and this one
+    // catches every other route including Raw, so a command added later cannot reopen the hole by
+    // forgetting to register it.
+    var FRONTEND_ONLY_EVENTS = { LoadGame: LOAD_FROM, ContinueGame: MENU_FROM };
+
+    function eventAllowedOn(eventName, page) {
+        var pages = FRONTEND_ONLY_EVENTS[eventName];
+        if (!pages) return true;
+        return pages.indexOf(page) >= 0;
+    }
+
     // Command grammar is tiny and whitespace-split, so a shell, a .bat file or the Rust lobby can
     // all produce it. Event names pass through unchanged: this is a thin remote for
     // engine.trigger, deliberately not a reimplementation of the game's commands.
@@ -462,6 +481,17 @@
 
         // Report BEFORE firing. ContinueGame and LoadGame replace this document, and Cohtml drops
         // in-flight requests during that teardown; a report sent afterwards never arrives.
+        //
+        // The event-name guard has to run here, before anything is dispatched, because this is the first
+        // point where a command has resolved to the event it will actually send. `Raw` chooses that name
+        // below the command check, so checking only the command leaves it unguarded.
+        if (!eventAllowedOn(eventName, PAGE)) {
+            report(line, false, 'refused on ' + PAGE + ': ' + eventName +
+                ' is only legal from ' + FRONTEND_ONLY_EVENTS[eventName].join('/') +
+                ' (firing it here tears down this document)');
+            return;
+        }
+
         state.sent++;
 
         // Prefer the real control. A press proves the action was available on this screen: if the

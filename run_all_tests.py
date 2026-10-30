@@ -175,6 +175,13 @@ if shutil.which("node"):
     # the race. This suite models the gate against coordination.rs and asserts the repeat exists.
     suite("clock", ["node", "clock_convergence_test.js"], HEADLESS, lambda out: passed_count(out, 16))
 
+    # The page guard must cover the *event*, not just the command word. `Raw <event>` resolves an arbitrary
+    # Gameface event name after the command check has already passed, so `Raw LoadGame autosave` from
+    # RaceWeekend.html reached engine.trigger with the one event proven to black-screen the process. This
+    # asserts the guard exists, that it runs before both the trigger and the control-press path, and that it
+    # does not over-refuse the events the in-game screens legitimately send.
+    suite("guard", ["node", "bridge_guard_test.js"], HEADLESS, lambda out: passed_count(out, 19))
+
     # ---- JS: end-to-end against a real supervisor process ------------------------------------
     # Needs the built supervisor binary. `cargo build --release` produces it; the runner builds it
     # below rather than skipping, because this is the one suite that proves two peers actually

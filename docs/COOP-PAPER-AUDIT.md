@@ -416,6 +416,63 @@ refusing the one car loses less. Either way the write chokepoint is now the thin
 
 ---
 
+## 14. The page guard did not guard the event, so `Raw` bypassed it
+
+Firing `LoadGame` or `ContinueGame` from an in-game document is the one operation this project knows destroys the
+session: it tears the front-end down and never rebuilds it, leaving a black screen with the process alive
+(`LOBBY-GATE.md`, and reproduced on a live client). `bridge.js` enforces this with
+
+```js
+var LOAD_FROM = ['Frontend'];
+function allowedFor(cmd, page) { ... }      // bridge.js:322, before the fix
+```
+
+and refuses with "refused on <page>" - which is the right shape, and correct as far as it goes.
+
+**It checked the command word, not the event.** The grammar also exposes `Raw <event> [args]`, documented in
+that same file as "any Gameface event by name" (`:336`). `Raw` resolves its argument to `eventName`
+*after* `allowedFor` has already passed, because the command it is matched on is `raw`, and `raw` is legal on
+every page. So
+
+```
+Raw LoadGame autosave        (sent while RaceWeekend.html is the loaded document)
+```
+
+passed the guard, reported success, and reached `engine.trigger` with exactly the event the guard exists to
+prevent. The protection covered the documented route and not the obvious one, and `Raw` is precisely the escape
+hatch an operator reaches for when the normal command does not work - so this was likely to be hit in practice
+rather than a theoretical hole.
+
+**Fixed** by adding a second check at the point where a command has resolved to the event it will actually
+send, keyed on the event name:
+
+```js
+var FRONTEND_ONLY_EVENTS = { LoadGame: LOAD_FROM, ContinueGame: MENU_FROM };
+function eventAllowedOn(eventName, page) { ... }
+```
+
+Derived from `LOAD_FROM`/`MENU_FROM` rather than restated, so the two cannot drift. Both checks are kept: the
+command check refuses earlier with a message naming the page, and the event check catches every other route -
+including `Raw`, and including any command added later that forgets to register itself.
+
+The guard also had to move **above the control-press path**, which returns early: pressing the real button is a
+different route to the same dispatch, so checking after it would have left the same class of hole open.
+
+**Tested** by `tools/headless/bridge_guard_test.js` (19 assertions), which extracts the real `allowedFor` and
+`eventAllowedOn` from the source rather than restating the rule, and additionally asserts that `dispatch()`
+calls the guard *before* both `engine.trigger.apply` and the press path - because a correct function that is
+never called is the failure mode that actually occurred. Removing the guard call makes two assertions fail.
+
+**Two process notes, since both cost time.** My first version of the test compared
+`indexOf('eventAllowedOn') < indexOf('engine.trigger.apply')` inside a fixed 6000-character window; the trigger
+lay just outside it, `indexOf` returned `-1`, and the assertion failed for a reason that had nothing to do with
+the code. Slicing to the end of the function fixed it, and the test now asserts the trigger was *found* before
+comparing positions, so a moved trigger cannot make the check vacuous. Separately, the suite reported FAIL while
+printing `19/19 assertions passed`: the runner parses `N/M passed`, and I had written `19/19 assertions passed`,
+which its regex does not match. The summary line now uses the exact shape the runner reads.
+
+---
+
 ## Summary of what this audit changed
 
 | finding | severity | state |
@@ -426,6 +483,7 @@ refusing the one car loses less. Either way the write chokepoint is now the thin
 | **the documented 30-name save-slot space is not the file space** (`save165`–`save168` and `customisation.sav` exist outside it) | **medium** - a co-op session named with an invented `slotName` may never be loadable | recorded in §11; the design should use an observed slot name |
 | **a protocol version mismatch was reported as "unreadable frame"**, discarding the reason that identifies it | **medium** - the ordinary failure after an update, misdiagnosed as a network problem | **fixed**: `BadVersion` is named with the peer version and the action; both halves tested |
 | **`write_car` trusted its car id**: unchecked `car_start(id)` could target ~1 MB past the car table | low (no live path - `write_cars` filters) but the failure is corrupting unrelated game memory | **fixed**: bounds refused at the chokepoint, before address and before auth |
+| **`Raw LoadGame` bypassed the page guard**: `allowedFor` matched the command word, and `Raw` resolves an arbitrary event name after that check | **high** - the documented black-screen was one `Raw` away on any in-game page | **fixed**: a second guard on the resolved event name, ahead of both the trigger and the press path; 19 assertions |
 | `Mailbox::drain` indexed the shared buffer directly on the game thread | low (unreachable today) but the failure mode is the whole process | **fixed**: `get(..)` with a zero-entry fallback |
 | save "opaque / unreadable" was imprecise: container is Unreal's, payload is compressed | low | corrected in this document and in `tools/save_format.py` |
 | `SIMULATE_RVA` still points at the right function in the installed exe | - | **verified statically**: file bytes at the RVA match the live-read prologue exactly (`tools/verify_offsets.py`) |
