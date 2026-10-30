@@ -1966,6 +1966,14 @@ pub fn start(supervisor: &str) {
     });
 }
 
+/// Default wait before the agent starts touching anything, in seconds.
+///
+/// Chosen to put start-up past the point where the engine is running (the game's first window appears within
+/// a few seconds), so the ordering matches the injected-into-a-running-game path that never crashed. It is a
+/// hypothesis made testable rather than a guess: set `COOP_AGENT_START_DELAY=0` to start immediately, or raise
+/// it, and the crash either returns or does not.
+pub const START_DELAY_SECS: u64 = 12;
+
 #[cfg(windows)]
 extern "system" fn thread_entry(_param: *mut u8) -> u32 {
     // Runs outside DllMain. Does the real work, then parks forever.
@@ -1985,6 +1993,30 @@ extern "system" fn thread_entry(_param: *mut u8) -> u32 {
             log_path().display()
         ));
     }
+
+    // Stand back while the game initialises.
+    //
+    // This is the one environmental difference between the configuration that worked and the one that dies.
+    // Injecting into a running game meant everything happened seconds after start-up, with the engine's
+    // allocators, CRT state and Steam already initialised. Loading via a proxy DLL means this thread runs during
+    // process attach, while all of that is still half-built - and a `__fastfail` (0xc0000409 in ucrtbase,
+    // reaching the end of the agent's own log with no panic recorded) is what the CRT produces when it is used
+    // before it is ready.
+    //
+    // A delay is not a fix in the sense of naming the guilty call, but it restores the ordering that demonstrably
+    // worked, and it is measurable: if the crash stops, the cause is "too early", and the delay can then be
+    // shortened until it returns. `COOP_AGENT_START_DELAY` overrides it, and 0 reproduces the immediate start for
+    // anyone testing that hypothesis.
+    let delay = std::env::var("COOP_AGENT_START_DELAY")
+        .ok()
+        .and_then(|v| v.trim().parse::<u64>().ok())
+        .unwrap_or(START_DELAY_SECS);
+    if delay > 0 {
+        log(&format!("waiting {delay}s for the game to initialise before starting"));
+        std::thread::sleep(Duration::from_secs(delay));
+        log("delay elapsed; starting");
+    }
+
     start_presence();
     start_join_listener();
     start(&supervisor_address());
