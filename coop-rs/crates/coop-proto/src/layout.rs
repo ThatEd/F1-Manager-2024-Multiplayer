@@ -158,6 +158,16 @@ pub fn car_at(base: &[u8], car: usize) -> Option<Car> {
         return None;
     }
     let o = CAR_BASE.checked_add(car.checked_mul(CAR_STRIDE)?)?;
+    car_from_record(base, o, car as u8)
+}
+
+/// Decodes one car from a buffer positioned at absolute offset `o`.
+///
+/// Split out because the two readers have different shapes: `car_at` addresses into the whole 10 MiB object, and
+/// a sparse reader holds a single ~3.8 KiB record with no object around it. Both must decode *identically*, so
+/// they share this. Passing a record-local buffer to `car_at` silently yields `None` - it would compute
+/// `CAR_BASE + car*STRIDE` inside a slice far too small - which is exactly the bug this split fixes.
+pub fn car_from_record(base: &[u8], o: usize, id: u8) -> Option<Car> {
     let mut tyres = [Tyre::default(); 4];
     for (w, t) in tyres.iter_mut().enumerate() {
         let s = o + off::TYRE_SURFACE0 + w * off::TYRE_WHEEL_STRIDE;
@@ -166,7 +176,7 @@ pub fn car_at(base: &[u8], car: usize) -> Option<Car> {
         t.condition = f32_at(base, s + 8)?;
     }
     Some(Car {
-        id: car as u8,
+        id,
         dist: f32_at(base, o + off::DIST)?,
         lat: f32_at(base, o + off::LAT)?,
         head: f32_at(base, o + off::HEAD)?,
@@ -312,6 +322,50 @@ pub fn rc(base: &[u8]) -> Option<crate::RcState> {
 /// Bytes needed to decode every car.
 pub fn car_block_len() -> usize {
     CAR_BASE + (CAR_MAX - 1) * CAR_STRIDE + CAR_STRIDE
+}
+
+/// Bytes of a car record that any field actually uses, measured from the offsets above.
+///
+/// The records sit on a `CAR_STRIDE` of 0x10D8, but the highest field the code reads or writes is
+/// `TYRE_SURFACE0 + 3*TYRE_WHEEL_STRIDE + 12` (the last tyre's condition), which is far below the stride.
+/// `read_cars` copies the whole 10 MiB block because that is simpler; a targeted reader only needs this much per
+/// car, which turns a 10 MiB read per snapshot into ~3 KiB.
+///
+/// Computed from the constants rather than written down, so moving a tyre offset cannot leave this stale and
+/// silently truncate the last field.
+pub fn car_record_used_len() -> usize {
+    // Every field `car_at` reads. This list has to match `car_at` - it is duplicated deliberately, because the
+    // alternative is deriving it from the reads themselves, which is not expressible here. A test pins the
+    // highest one, so forgetting to add a field shows up as a truncated read rather than as a silent zero.
+    let fields = [
+        off::LAT,
+        off::HEAD,
+        off::SPLT,
+        off::SEG,
+        off::DIST,
+        off::SPD,
+        off::ACC,
+        off::NODE,
+        off::RACE_POS,
+        off::LAP,
+        off::LAP_TIME,
+        off::DOWN,
+        off::DONE,
+        off::DRS,
+        off::PIT,
+        off::PIT_REQ,
+        off::STAY_OUT,
+        off::LAP_TYPE,
+        off::FUEL,
+        off::TYRE_LO,
+        off::TYRE_HI,
+    ];
+    let mut end = fields.iter().copied().max().unwrap_or(0);
+    // The tyre block is the highest region: surface/carcass/condition per wheel.
+    end = end.max(off::TYRE_SURFACE0 + (off::TYRE_WHEELS - 1) * off::TYRE_WHEEL_STRIDE + 12);
+    // +4 for the widest field (a 4-byte float), then rounded up to 8 so a 4-byte value straddling the end
+    // cannot be cut in half by the read itself.
+    ((end + 4) + 7) & !7
 }
 
 /// Bytes needed to read race control as well as the cars.
@@ -465,5 +519,75 @@ mod tests {
             ..Car::default()
         };
         assert!(encode_car(&mut buf, &c).is_none());
+    }
+
+    /// `car_record_used_len` must cover every field `car_at` reads, or a sparse read silently loses data.
+    ///
+    /// This is the failure mode worth pinning: the length is derived from the offsets, but `car_at` is the thing
+    /// that has to agree with it. If a future field is read from beyond this span, sparse reads would return a
+    /// zero for it and nothing would say so.
+    #[test]
+    fn the_used_span_covers_every_field_a_car_read_touches() {
+        let span = car_record_used_len();
+        assert!(span < CAR_STRIDE, "a used span of {span:#X} would defeat the point of a stride of {CAR_STRIDE:#X}");
+        // Highest field car_at touches, from the offsets module.
+        let highest = off::TYRE_SURFACE0 + (off::TYRE_WHEELS - 1) * off::TYRE_WHEEL_STRIDE + 8 + 4;
+        assert!(
+            span >= highest,
+            "used span {span:#X} does not cover the last tyre field at {highest:#X}"
+        );
+        // And the saving is real: compare with the block read it replaces.
+        let block = car_block_len();
+        assert!(
+            CAR_MAX * span * 8 < block,
+            "sparse reads ({:#X} for all cars) must be far cheaper than the block read ({block:#X})",
+            CAR_MAX * span
+        );
+    }
+
+    /// The sparse path must produce exactly the same cars as the block path for the same memory.
+    #[test]
+    fn a_sparse_read_matches_a_block_read() {
+        // Lay out a full object, then carve the per-car windows out of it exactly as read_cars_sparse does.
+        let mut object = vec![0u8; OBJECT_SIZE];
+        for i in 0..CAR_MAX {
+            let c = Car {
+                id: i as u8,
+                dist: 100.0 + i as f32,
+                spd: 40.0 + i as f32,
+                lap: i as i32,
+                ..Car::default()
+            };
+            assert!(encode_car(&mut object, &c).is_some());
+        }
+        // Give the last tyre of car 3 a distinctive condition: it is the field nearest the end of the used span,
+        // so a too-short span shows up here rather than as a subtle zero.
+        let probe = car_start(3) + off::TYRE_SURFACE0 + 3 * off::TYRE_WHEEL_STRIDE + 8;
+        object[probe..probe + 4].copy_from_slice(&0.625f32.to_bits().to_le_bytes());
+
+        let block = cars(&object);
+        assert_eq!(block.len(), CAR_MAX);
+
+        let span = car_record_used_len();
+        let sparse: Vec<Car> = (0..CAR_MAX)
+            .filter_map(|i| {
+                let at = car_start(i);
+                car_from_record(&object[at..at + span], 0, i as u8)
+            })
+            .collect();
+
+        assert_eq!(sparse.len(), CAR_MAX);
+        assert_eq!(
+            sparse.iter().map(|c| c.id).collect::<Vec<_>>(),
+            block.iter().map(|c| c.id).collect::<Vec<_>>()
+        );
+        for (a, b) in sparse.iter().zip(block.iter()) {
+            assert_eq!(a.dist, b.dist, "car {} dist", a.id);
+            assert_eq!(a.spd, b.spd, "car {} spd", a.id);
+            assert_eq!(a.lap, b.lap, "car {} lap", a.id);
+            assert_eq!(a.tyres[3].condition, b.tyres[3].condition, "car {} last tyre", a.id);
+        }
+        // The probe specifically.
+        assert_eq!(sparse[3].tyres[3].condition, 0.625);
     }
 }

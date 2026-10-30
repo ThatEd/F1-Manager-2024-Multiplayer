@@ -784,6 +784,59 @@ UI should stop promising "your own garage" in Versus, because it cannot deliver 
 
 ---
 
+## 21. The per-snapshot cost: 10 MiB read out of the game to send 2.4 KiB
+
+Bandwidth was worth checking because a cache-coherency loop is an obvious objection to any co-op mod, and the
+answer is that **the wire is fine and the local read is not**.
+
+`encode_car` writes 112 bytes per car (`coop-proto/src/lib.rs:457-485`), so a 22-car `Snapshot` is **2,492 bytes**
+including the 14-byte header. At the default `--hz 20` (`coop-link/src/main.rs:241`) that is **48.7 KiB/s, or
+0.4 Mbit/s** - trivial for LAN, and 1.2 Mbit/s even at 60 Hz. Networking is not the constraint.
+
+The read is. `read_cars` (`coop-mem/src/lib.rs:394`) reads `car_block_len()` bytes, and
+`car_block_len() = CAR_BASE + CAR_MAX * CAR_STRIDE = 0x95BC00 + 22*0x10D8 ≈ 10.07 MiB`. So each snapshot copies
+**10.07 MiB out of the game process to derive 2.43 KiB** - a ratio of roughly **4,200x**:
+
+```
+at 20 Hz  ->  201 MiB/s copied out of the game process
+```
+
+Three consequences, all of which are design problems rather than bugs:
+
+1. **`read_object` is barely more expensive than `read_cars`.** The "cheaper" path exists to avoid race control,
+   but `RF_STATE` sits at `0xA13289` - the very end of `OBJECT_SIZE 0xA132F0` - so reading the cars means
+   touching 99.4% of the object anyway. Two functions with a 5% cost difference, one of which silently omits
+   race control (`rc()` returns `None` rather than zeros, which is at least honest). Worth knowing before anyone
+   optimises "use read_cars instead".
+2. **`FRAME_GAP` is dead.** `main.rs:21` declares `const FRAME_GAP: Duration = Duration::from_millis(25);` and
+   nothing reads it - the loop paces itself with `period` from `--hz` instead (`main.rs:751-754`). A constant
+   named and commented as a rate limiter that has no callers is worse than no constant: it reads as though
+   back-pressure exists, and a future reader tuning it would change nothing. The real cadence is `--hz`
+   (default 20) or whatever a 10 MiB read per iteration permits, which the code reports live as `"{} Hz"`
+   (`main.rs:743`) - the right thing to instrument. **Unknown** what it achieves in a race, because a 10 MiB
+   read per frame may well dominate; one launch measures it.
+3. **A sparse reader now exists, opt-in.** `read_cars_sparse` reads `car_record_used_len()` (≈3.8 KiB, derived
+   from the field offsets rather than hardcoded) per car: **~83 KiB per snapshot instead of 10.07 MiB**, roughly
+   120x less work, for byte-identical output. Exposed as `--sparse`, deliberately *not* the default until it has
+   run in a live race, because the block read is the known-good path and a first live comparison should run both.
+
+**Writing it went wrong once, and the test caught it.** My first version did the obvious thing - slice the record
+out of the object and call `car_at(&slice, i)`. That always returns `None`: `car_at` computes
+`CAR_BASE + car*CAR_STRIDE` from the buffer it is given, so inside a 3.8 KiB slice the offset is far past the
+end. The two readers have genuinely different shapes and could not share `car_at`. Fixed by splitting the decoder
+into `car_from_record(base, offset, id)` - which both now call, so they cannot drift - with `car_at` as the
+address-computing wrapper. The regression test compares sparse against block across all 22 cars, including the
+last tyre of the highest car, which is the field nearest the end of the span.
+
+---
+
+## Summary of what this audit changed
+
+This is the same shape as the career gap in §20: the implemented thing works in isolation and the *cost model*
+was never checked, so the design's stated constraint (bandwidth) is not the real one (a 10 MiB memcpy pipeline).
+
+---
+
 ## Summary of what this audit changed
 
 | finding | severity | state |
@@ -801,6 +854,8 @@ UI should stop promising "your own garage" in Versus, because it cannot deliver 
 | a live-server test had a fixed 12 s deadline that starved under load | low - but a red result that may be noise trains people to ignore red | **fixed**: 60 s, overridable, fails fast if the server exits, and prints its output |
 | **`coop-link` wrote received saves to a hardcoded `SaveGames`**, while the game keeps one folder per profile | **high on another machine** - the transfer reports success and the save lands where the game never looks | **fixed**: picks the folder whose newest `.sav` is newest; tested on a synthetic layout and against the real one |
 | **the career layer is designed and not built**: nothing on the wire carries management state, so both players edit one DB and only the host's edits survive a save | **critical for the stated goal** - "a full career together" is not achievable as built, and Versus advertises a garage it cannot provide | recorded in §20 with the concrete next step (`Msg::Stmt` + a `prepare`-path capture), and a recommendation to stop promising it in the UI until it exists |
+| **~200 MiB/s is copied out of the game per snapshot** to build a 2.4 KiB frame (10.07 MiB read at 20 Hz) | medium - works, but the cost model was never checked, and a live test would blame the network | **fixed**: `read_cars_sparse` reads ~83 KiB per snapshot for identical output, behind `--sparse` |
+| `FRAME_GAP` was a 25 ms "rate limiter" that nothing read | low - a name that implies back-pressure that does not exist | **fixed**: removed, with the reason recorded where it lived |
 | `Mailbox::drain` indexed the shared buffer directly on the game thread | low (unreachable today) but the failure mode is the whole process | **fixed**: `get(..)` with a zero-entry fallback |
 | save "opaque / unreadable" was imprecise: container is Unreal's, payload is compressed | low | corrected in this document and in `tools/save_format.py` |
 | `SIMULATE_RVA` still points at the right function in the installed exe | - | **verified statically**: file bytes at the RVA match the live-read prologue exactly (`tools/verify_offsets.py`) |

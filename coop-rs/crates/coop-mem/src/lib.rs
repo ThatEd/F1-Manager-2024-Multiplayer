@@ -396,6 +396,40 @@ impl Process {
         Ok(coop_proto::layout::cars(&buf))
     }
 
+    /// Read the 22 cars with one small read per car instead of one 10 MiB read for all of them.
+    ///
+    /// `read_cars` reads `car_block_len()` = `CAR_BASE + 22*CAR_STRIDE` ≈ 10.07 MiB, because the car records are
+    /// spread across a 0x10D8 stride of which only ~120 bytes are used. At the default 20 Hz that is **200 MiB/s
+    /// copied out of the game process to derive a 2.43 KiB frame** (§21 of the audit). Nothing on the wire is
+    /// wrong; the local copy is 4,000x more work than the problem needs.
+    ///
+    /// This reads just the used span of each record. It is *not* unambiguously better: the reads are no longer
+    /// one contiguous range, so a value can be torn between two calls if the sim writes during the loop, and a
+    /// torn snapshot is worse than a slow one. The mitigation is the caller's: the game thread applies host
+    /// state at a single point (`hookmail::apply`), so a torn read shows up as one car jumping for one frame
+    /// rather than as a corrupt write. `read_cars` stays as the reference implementation and the thing to
+    /// compare against.
+    ///
+    /// Returns `None` for a car whose read fails, and the caller decides whether a partial field is acceptable -
+    /// a shorter vector is a visible signal rather than a silently zeroed car.
+    pub fn read_cars_sparse(&self, rsm: usize) -> Result<Vec<coop_proto::Car>, MemError> {
+        let span = coop_proto::layout::car_record_used_len();
+        let mut out = Vec::with_capacity(coop_proto::layout::CAR_MAX);
+        let mut buf = vec![0u8; span];
+        for i in 0..coop_proto::layout::CAR_MAX {
+            let at = rsm + coop_proto::layout::car_start(i);
+            if self.read_into(at, &mut buf).is_err() {
+                // Skip this car rather than fabricate it. `cars()` on a short buffer yields fewer cars, which
+                // `decode`'s car-count check rejects outright - so a partial field is loud, not silent.
+                continue;
+            }
+            if let Some(car) = coop_proto::layout::car_from_record(&buf, 0, i as u8) {
+                out.push(car);
+            }
+        }
+        Ok(out)
+    }
+
     /// Read the whole object: cars plus race control.
     pub fn read_object(&self, rsm: usize) -> Result<Vec<u8>, MemError> {
         self.read(rsm, coop_proto::layout::object_len())

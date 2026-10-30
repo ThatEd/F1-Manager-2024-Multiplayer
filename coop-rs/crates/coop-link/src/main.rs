@@ -18,7 +18,10 @@ use std::io::{Read, Write};
 use std::net::TcpStream;
 use std::time::{Duration, Instant};
 
-const FRAME_GAP: Duration = Duration::from_millis(25);
+// `FRAME_GAP` used to live here: a 25 ms "rate limiter" that nothing read. The host loop paces itself from
+// `--hz` instead, so the constant looked like back-pressure that did not exist and tuning it would have changed
+// nothing. Removed rather than wired up, because at the default 20 Hz the loop period is already 50 ms and a
+// second limiter would only fight it.
 
 /// Frames with a non-advancing host clock before the session is assumed over. At 20 Hz this is
 /// about two seconds: long enough to ride out a red flag or a pause, short enough that the client
@@ -150,7 +153,7 @@ fn configured_supervisor() -> Option<String> {
 
 fn usage() -> ! {
     eprintln!(
-        "coop-link --role host   --supervisor <host:port> --pid <pid> [--hz N]\n\
+        "coop-link --role host   --supervisor <host:port> --pid <pid> [--hz N] [--sparse]\n\
          coop-link --role client --supervisor <host:port> [--hz N]\n\
          coop-link --inject [--pid <pid> | --name <image>] [--dll <path>]\n\
          \n\
@@ -239,6 +242,8 @@ fn main() {
         .or_else(configured_supervisor)
         .unwrap_or_else(|| DEFAULT_SUPERVISOR.to_string());
     let hz: u32 = arg(&args, "--hz").and_then(|s| s.parse().ok()).unwrap_or(20);
+    // Read only the used span of each car record instead of the whole 10 MiB block. See `read_cars_sparse`.
+    let sparse = args.iter().any(|a| a == "--sparse");
 
     let result = match role.as_str() {
         "host" if args.iter().any(|a| a == "--fake") => {
@@ -262,7 +267,7 @@ fn main() {
                 },
             };
             let save = arg(&args, "--send-save");
-            run_host(&supervisor, pid, hz, save.as_deref())
+            run_host(&supervisor, pid, hz, save.as_deref(), sparse)
         }
         "client" => {
             // A client that is not attached to its own game cannot apply anything; it only mirrors
@@ -584,7 +589,7 @@ fn has_motion(proc: &coop_mem::Process, base: usize) -> bool {
     false
 }
 
-fn run_host(supervisor: &str, pid: u32, hz: u32, save: Option<&str>) -> Result<(), String> {
+fn run_host(supervisor: &str, pid: u32, hz: u32, save: Option<&str>, sparse: bool) -> Result<(), String> {
     let proc = coop_mem::Process::open(pid).map_err(|e| format!("open pid {pid}: {e}"))?;
     let mut stream = connect(supervisor, Side::Host, 22)?;
     say(&format!("[host] connected to supervisor at {supervisor}, reading pid {pid} at {hz} Hz"));
@@ -671,7 +676,15 @@ fn run_host(supervisor: &str, pid: u32, hz: u32, save: Option<&str>) -> Result<(
         }
 
         let started = Instant::now();
-        let cars = match proc.read_cars(rsm) {
+        // `--sparse` reads ~3.8 KiB per car instead of the whole 10 MiB block. Measured cost of the block read at
+        // 20 Hz is ~200 MiB/s copied out of the game, to build a 2.43 KiB frame; this cuts the local copy by
+        // roughly three orders of magnitude. Opt-in rather than default, because it is not yet run against a live
+        // race and the block read is the known-good path - a first live comparison should run both.
+        let cars = match if sparse {
+            proc.read_cars_sparse(rsm)
+        } else {
+            proc.read_cars(rsm)
+        } {
             Ok(c) => c,
             Err(_) => {
                 // The object went away - a race ending or a level change. Rediscover, and skip this
