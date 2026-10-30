@@ -124,10 +124,24 @@ ok(loadPages === "['Frontend']",
   'LoadGame is allowed only on Frontend, matching where the game itself issues it',
   String(loadPages));
 
+// ---- `Advance <n>` must send exactly n events, not n+1 ----------------------------------------
+// The loop sends extras and then the tail of dispatch() sends one more through the preferred route. The
+// loop used to run `i < times` starting at 0, so `Advance 3` fired four AdvanceToNextEvent. On the calendar
+// that is not harmless: an extra advance moves the career past an event, skipping a race weekend for both
+// players in a shared session.
+const advanceBlock = (dispatchBody.match(/cmd === 'advance'\)[\s\S]*?eventName = 'AdvanceToNextEvent';/) || [''])[0];
+ok(advanceBlock.length > 0, 'the advance branch is still recognisable', 'update this test if it was renamed');
+ok(/i < times - 1/.test(advanceBlock),
+  'the loop must send times-1, because the tail sends the last one',
+  'with `i < times` the total is n+1');
+ok(/\(n \+ 1\) \* 1200/.test(advanceBlock),
+  'the spaced extras must not start at delay 0, or they collide with the tail trigger',
+  'delay 0 races the final dispatch');
+
 const failed = results.filter((r) => !r.ok).length;
 // The runner parses `N/M passed` from the summary line, so keep that exact shape: an extra word between the
-// counts and "passed" makes a passing suite look empty, which is how this suite first reported FAIL with
-// 19/19 assertions green.
+// counts and "passed" makes a passing suite look empty, which is how this suite first reported FAIL while
+// printing its assertions green.
 console.log(`\n  ${results.length - failed}/${results.length} passed`);
 if (failed) {
   console.log(`  ${failed} failed`);

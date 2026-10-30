@@ -180,7 +180,7 @@ if shutil.which("node"):
     # RaceWeekend.html reached engine.trigger with the one event proven to black-screen the process. This
     # asserts the guard exists, that it runs before both the trigger and the control-press path, and that it
     # does not over-refuse the events the in-game screens legitimately send.
-    suite("guard", ["node", "bridge_guard_test.js"], HEADLESS, lambda out: passed_count(out, 19))
+    suite("guard", ["node", "bridge_guard_test.js"], HEADLESS, lambda out: passed_count(out, 22))
 
     # ---- JS: end-to-end against a real supervisor process ------------------------------------
     # Needs the built supervisor binary. `cargo build --release` produces it; the runner builds it

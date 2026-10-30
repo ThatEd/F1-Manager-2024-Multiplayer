@@ -473,6 +473,31 @@ which its regex does not match. The summary line now uses the exact shape the ru
 
 ---
 
+## 15. `Advance <n>` sent n+1 events, which in a shared session skips a race
+
+Same branch as §14. `Advance <n>` is documented as sending the advance event *n* times, spaced, because a single
+`AdvanceToNextEvent` can be swallowed by the UI with no error. The extras were emitted by a loop and then the
+tail of `dispatch()` sent one more through the preferred route, so the two together fired **n+1**:
+
+```js
+for (var i = 0; i < times; i++) { ... setTimeout(..., n * 1200) ... }   // n extras, one at delay 0
+eventName = 'AdvanceToNextEvent';                                       // and the tail sends one more
+```
+
+Why this is not a cosmetic off-by-one: on the calendar screens `AdvanceToNextEvent` does not merely refresh a
+view, it **moves the career forward**. An unintended extra advance steps past an event - and in a shared session
+that skips a race weekend for *both* players, from a command one of them issued. It also silently contradicted
+the documented count, so an operator asking for three advances got four and had no way to see it: each trigger
+looks identical in the log, and the counter reported `times - 1` extras because that matched the loop rather
+than the total.
+
+Fixed: the loop now sends `times - 1` spaced at `(n + 1) * 1200`, leaving the tail to send the last one through
+the preferred route. That keeps the useful property that one of the n goes via the real control, and it no
+longer races a delay-0 trigger against the final dispatch. Two assertions cover it - the loop bound and the
+start delay - and reverting either fails the suite.
+
+---
+
 ## Summary of what this audit changed
 
 | finding | severity | state |
@@ -483,7 +508,8 @@ which its regex does not match. The summary line now uses the exact shape the ru
 | **the documented 30-name save-slot space is not the file space** (`save165`–`save168` and `customisation.sav` exist outside it) | **medium** - a co-op session named with an invented `slotName` may never be loadable | recorded in §11; the design should use an observed slot name |
 | **a protocol version mismatch was reported as "unreadable frame"**, discarding the reason that identifies it | **medium** - the ordinary failure after an update, misdiagnosed as a network problem | **fixed**: `BadVersion` is named with the peer version and the action; both halves tested |
 | **`write_car` trusted its car id**: unchecked `car_start(id)` could target ~1 MB past the car table | low (no live path - `write_cars` filters) but the failure is corrupting unrelated game memory | **fixed**: bounds refused at the chokepoint, before address and before auth |
-| **`Raw LoadGame` bypassed the page guard**: `allowedFor` matched the command word, and `Raw` resolves an arbitrary event name after that check | **high** - the documented black-screen was one `Raw` away on any in-game page | **fixed**: a second guard on the resolved event name, ahead of both the trigger and the press path; 19 assertions |
+| **`Raw LoadGame` bypassed the page guard**: `allowedFor` matched the command word, and `Raw` resolves an arbitrary event name after that check | **high** - the documented black-screen was one `Raw` away on any in-game page | **fixed**: a second guard on the resolved event name, ahead of both the trigger and the press path; 22 assertions |
+| **`Advance <n>` fired n+1 `AdvanceToNextEvent`**, and one of them at delay 0 | **high** - an extra advance moves the career, so a shared session silently skips a race weekend for both players | **fixed**: loop sends `times - 1`, tail sends the last; two assertions, both reverted to prove they fail |
 | `Mailbox::drain` indexed the shared buffer directly on the game thread | low (unreachable today) but the failure mode is the whole process | **fixed**: `get(..)` with a zero-entry fallback |
 | save "opaque / unreadable" was imprecise: container is Unreal's, payload is compressed | low | corrected in this document and in `tools/save_format.py` |
 | `SIMULATE_RVA` still points at the right function in the installed exe | - | **verified statically**: file bytes at the RVA match the live-read prologue exactly (`tools/verify_offsets.py`) |

@@ -447,18 +447,24 @@
             // per press (needs-a-response -> inbox, sponsor targets -> its own screen, race weekend
             // -> AdvanceToNextEvent). On the race-weekend screens the press that actually starts the
             // session is AdvanceToNextEvent, sometimes preceded by other UI steps, so a single
-            // Advance from the bridge can be swallowed with no error. `advancen` sends it N times,
+            // Advance from the bridge can be swallowed with no error. `Advance <n>` sends it n times,
             // spaced, which is what "advance until the sim steps" needs in practice.
+            //
+            // The extras start at 1200ms, not 0, and number n-1, because the tail of this function sends
+            // exactly one more through the preferred route. The loop used to send all n starting at 0 and
+            // then fall through, so `Advance 3` fired four times - and on the calendar screens an extra
+            // AdvanceToNextEvent is not harmless, it moves the career past an event, skipping a race
+            // weekend for both players in a shared session.
             var times = 1;
             if (parts[1]) {
                 var parsed = parseInt(parts[1], 10);
                 if (parsed > 0 && parsed <= 20) times = parsed;
             }
-            for (var i = 0; i < times; i++) {
+            for (var i = 0; i < times - 1; i++) {
                 (function (n) {
                     setTimeout(function () {
                         try { engine.trigger('AdvanceToNextEvent'); } catch (e) { /* view gone */ }
-                    }, n * 1200);
+                    }, (n + 1) * 1200);
                 })(i);
             }
             eventName = 'AdvanceToNextEvent';
