@@ -3521,3 +3521,80 @@ and report `sim entry: ... unreadable` instead of faulting. Both directions conf
 it can no longer happen silently. The honest position is that the next launch is still an experiment, and the
 first thing to read is `coop_agent.log` for a `PANIC at <file>:<line>` line - which is the one piece of
 information that would turn this from inference into fact.
+
+### 2026-10-30 - CRASH ROOT CAUSE FOUND (it was never our code), and the mod removed from the game
+
+Owner asked for the co-op mod to be removed from the game for now. **It is fully removed from both machines** -
+24 files plus the pak on each, no `version.dll`, no co-op processes. What was kept: this source tree, the
+`backup-removed-2026-10-30/` folder (the logs, the exact DLL that was deployed, and the 233 MB
+`CoopDiag_replay.csv` moved out of the game folder), and the notes. The game is as it was before the mod.
+
+#### The crash was UE4SS, proven from the dumps
+
+Windows had already written full dumps. `.ecxr` plus a stack walk of all three crashes from the current runs
+gives an identical picture every time:
+
+```
+ucrtbase!abort+0x4e                      int 29h  (__fastfail)
+ucrtbase!terminate+0x1e
+VCRUNTIME140_1!FindHandler<__FrameHandler4>      <- no handler: unhandled C++ exception
+VCRUNTIME140_1!__InternalCxxFrameHandler...
+ntdll!RtlRaiseException                  0xe06d7363  (C++ exception code)
+KERNELBASE!RaiseException
+VCRUNTIME140!_CxxThrowException
+UE4SS!RC::Unreal::FFieldClassVariant::HasAnyCastFlags+0xda1e     <- thrown here
+UE4SS!RC::Unreal::FFieldClassVariant::HasAnyCastFlags+0xa7d0
+UE4SS!...DebugConsoleDevice::~DebugConsoleDevice+0x3459
+ucrtbase!thread_start
+kernel32!BaseThreadInitThunk
+```
+
+`ExceptionCode: c0000409, Subcode: 0x7 FAST_FAIL_FATAL_APP_EXIT`, faulting module `ucrtbase`, offset
+`0xa527e` = `ucrtbase!abort`. That is `std::terminate` after an unhandled C++ exception.
+
+**`coop_agent.dll` does not appear anywhere in the faulting stack - in any of the three dumps.** The thread that
+dies is a UE4SS worker thread. UE4SS is the UE4 script/mod loader in `Binaries\Win64\UE4SS.dll`, present
+independently of this project.
+
+This also explains the two things that made the failure look like ours and misled me twice:
+
+- **No `PANIC at` line and a trace stopping at `hook installed`** - because nothing of ours threw. A
+  `__fastfail` bypasses every exception handler including the agent's own, which is exactly why the agent's
+  crash handler stayed silent.
+- **It only happened when our DLL was installed** - `version.dll` loads `coop_agent.dll` during process attach,
+  which shifts module load order and timing for everything in the process. That is enough to change which UE4SS
+  path faults. Correlation, not causation: our DLL was the trigger's *precondition*, not the faulting code.
+
+**Disproven along the way, recorded so nobody retries them:**
+
+| hypothesis | result |
+|---|---|
+| `LoadLibraryA` inside `DllMain` | built a minimal proxy doing exactly that; host survived both variants |
+| agent too early in process attach | added a 12 s start delay; it ran (`waiting 12s`, `delay elapsed`) and still crashed |
+| unchecked read of game offsets | real bug, fixed, but it only affected non-game hosts; the game's address was mapped |
+| a Rust panic | no panic in the log; dump shows a C++ exception from UE4SS; `panic = "abort"` hook never fired |
+
+#### What this means for resuming
+
+The mod itself may be fine. The blocker is **an incompatibility with the UE4SS install in that `Binaries\Win64`**,
+and the cheap test is to check whether the game starts with `version.dll` + `coop_agent.dll` present but UE4SS
+disabled (rename `dwmapi.dll` and `UE4SS.dll` aside) - which distinguishes "our DLL is incompatible with a
+loaded UE4SS" from "UE4SS is broken here independently". Nobody has run that, and it is one launch rather than a
+code change.
+
+Two things worth keeping from this session regardless: the agent no longer crashes a non-game host
+(`readable()` guard + host-name check, verified both directions), and a panic now logs `PANIC at file:line`
+instead of vanishing.
+
+#### Removal, exactly
+
+Both machines: `coop_agent*.dll` (9 variants on the host, 2 on the client), `coop-link.exe`, `coop-inject.exe`,
+`coop-supervisor.exe`, `coop-keys.exe`, `coop-probe.exe`, `coop-watch.exe`, `coop-hotkey.cmd`, every
+`coop_*.txt`, `coop_*.log`, `coop_*.trace`, `coop_*.enable`, the `coop-*.cmd` helpers, `version.dll`, the
+`~mods\CoopBridge_P.pak` pak, and the client's stale `.lk*`/`.old`/`.stale` leftovers. A stray `coop-link`
+process on the client was holding `coop-link.exe.stale`; it was stopped and the file removed. Verified after:
+no `coop*` file, no `version.dll`, no co-op pak, no co-op process, on either machine.
+
+Untouched: the game's own `crash_*.dmp` files and everything under `CoopDiag*` that belonged to prior research
+(the replay CSV was moved to the backup folder rather than deleted, since it is 233 MB of captured data that
+would be expensive to recapture).
