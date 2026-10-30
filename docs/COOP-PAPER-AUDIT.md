@@ -314,6 +314,49 @@ described as "uses only proven mechanisms" - the reload it relies on is the step
 
 ---
 
+## 11. Save slot naming — the documented 30-name space is not the file space
+
+`UI-COMMANDS.md:777` states, correctly reading `Saves.js:12`:
+
+> `so the key space is exactly autoSave, save1 … save29 — 30 names.`
+
+That is true of the **DataStore**, and I verified it in the real export (`Saves.js:12-24`: a loop to 30,
+`contextID = i == 0 ? 'autoSave' : 'save' + i`, with `slotName` set to that context id). Every
+`LoadGame`/`SaveGame` call sends that string - `LoadSaveScreen.js:127-128` and `:148-149` both read
+`slotName` from the selected slot context and pass it straight to `sendEvent`.
+
+It is **not** true of the files. The real save folder holds:
+
+```
+numeric slots: 0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 29, 165, 166, 167, 168
+plus: autosave.sav, customisation.sav, player.sav
+```
+
+`save165`–`save168`, `save0` and `customisation.sav` are outside the documented set. So `slotName` is not
+decoded by the engine as "one of a fixed 30" — it is mapped to a filename over a wider range, and one of the
+non-numeric names (`customisation`) has no DataStore context at all.
+
+**Why this matters for co-op, concretely.** The bridge already uses `LoadGame <slot>` as its proven path to load
+a chosen save. Two consequences:
+
+1. Writing a save under a *made-up* `slotName` such as `coop_session` is **not** known to work: the engine has
+   to map the string to a file, and every observed mapping is `save<N>`, `autosave`, `customisation` or
+   `player`. A name it does not recognise could be ignored, or could create a file that the save/load screen
+   never lists. **unknown** either way - and the honest thing is to use an observed name rather than invent one.
+2. Conversely, `LoadGame` accepts context ids the UI palette does not show (`save165` has a file but no
+   DataStore slot), so the receiving side's ability to load a specific file is broader than "30 slots" suggests.
+
+**Correction for the design:** when the client receives a session payload, name it after an **observed** slot
+convention (`save<N>` with `N` chosen to be free, or overwrite `autosave`), and drive the load with the matching
+`slotName`. Do not assume a 30-name ceiling, and do not assume an arbitrary string maps to a file.
+
+**Also verified here:** the received save does land where the game reads it. `coop-link`'s `session_dir()`
+resolves `%LOCALAPPDATA%\F1Manager24\Saved\SaveGames` - the same directory the game and the save/load screen use -
+and the transfer is hash-checked before the write (`main.rs:1251-1267`). So the *transport* is correct; only the
+naming assumption was shaky.
+
+---
+
 ## Summary of what this audit changed
 
 | finding | severity | state |
@@ -321,6 +364,7 @@ described as "uses only proven mechanisms" - the reload it relies on is the step
 | a lost clock frame desynced the pause state permanently, because nothing re-published it | **high** | **fixed**: the agent heartbeat re-publishes while paused; guarded by an 18-assertion suite |
 | `coop-auth` is complete and never called, while comments claim it enforces team rules | **medium** - nothing broken today, but the guarantee was absent | **fixed**: gated at both write chokepoints (`LiveDb::sql`, `LiveDb::write_car`), with wiring tests |
 | **team retarget's "edit then reload" loses the edit**: `LoadGame` re-reads from disk, and nothing persists a runtime `UPDATE` | **high** - the recommended Versus implementation cannot work as written | recorded; the fix is a persistence step, and the first experiment is specified in §10 |
+| **the documented 30-name save-slot space is not the file space** (`save165`–`save168` and `customisation.sav` exist outside it) | **medium** - a co-op session named with an invented `slotName` may never be loadable | recorded in §11; the design should use an observed slot name |
 | `Mailbox::drain` indexed the shared buffer directly on the game thread | low (unreachable today) but the failure mode is the whole process | **fixed**: `get(..)` with a zero-entry fallback |
 | save "opaque / unreadable" was imprecise: container is Unreal's, payload is compressed | low | corrected in this document and in `tools/save_format.py` |
 | `SIMULATE_RVA` still points at the right function in the installed exe | - | **verified statically**: file bytes at the RVA match the live-read prologue exactly (`tools/verify_offsets.py`) |
