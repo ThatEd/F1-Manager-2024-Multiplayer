@@ -767,20 +767,72 @@ the mode that cannot work yet.
 
 ### So, honestly
 
-**Co-op does not work on paper for a full career, and the gap is one named, designed, unbuilt layer.** What works is:
+**Co-op did not work on paper for a full career, and the gap was one named, designed, unbuilt layer.** As of
+§22 that layer's wire format and safe applier are built and tested; what remains is the **producer** and the live
+call site.
 
-* two players in the same career, same clock, same calendar, same race weekend;
-* car positions in a live race;
-* contract and vote arbitration so two players do not collide;
-* team ownership so the picker greys out what is taken.
+Works today: two players in the same career, same clock, same calendar, same race weekend; car positions in a
+live race; contract and vote arbitration; team ownership so the picker greys out what is taken.
 
-What does not: **two players' management history coexisting in one career.** That needs the statement log in
-§4.3, plus a decision on conflict resolution for rows both players legitimately touch (`RacesPS`, `StandingsPS`,
-`CalendarPS` are engine-computed, so only the host's copy is authoritative - which is the easy half).
+Does not yet: **a client's management action reaching the host.** `Msg::Stmt` can carry it and `stmtapply` can
+apply it safely, but nothing captures the game's own statements to put on that wire - that is a hook on the
+engine's prepare path, which needs the game running.
 
-**The next thing to build is not another encoder.** It is `Msg::Stmt` plus a capture hook on `sqlite3_exec`'s
-`prepare` path, or an explicit, documented acceptance that only the host's career edits count - in which case the
-UI should stop promising "your own garage" in Versus, because it cannot deliver it.
+**The next thing to build is that capture hook, not another encoder.** Failing that, the honest alternative is to
+document that only the host's career edits count - in which case the UI should stop promising "your own garage"
+in Versus, because it cannot deliver it.
+
+---
+
+## 22. `Msg::Stmt` — the career layer's wire format and applier, built
+
+§20 ended with a named gap: nothing on the wire carried management state, so two players editing one career
+diverged and the last save won. This closes the two halves that can be built and tested without the game.
+
+### The message
+
+`Msg::Stmt { seq, table, pk, set }` (`coop-proto/src/lib.rs`, `TAG_STMT = 15`) carries **a row identity and typed
+values, not SQL text**, and that is a security decision rather than a style one. The only write path the mod has
+is `LiveDb::sql`, which hands a single string to `sqlite3_exec` *inside the game process*. Accepting a peer's SQL
+string would be arbitrary code execution against a live database from the other machine. Instead:
+
+* `table` names the target, `pk` identifies the row, `set` holds `(column, StmtValue)` pairs;
+* `StmtValue` is `Null | Int | Real | Text`, carrying the type explicitly because `"1"` and `1` are the same
+  string and different SQL, and a career mixes integer ids, text names and float money in adjacent columns;
+* `seq` is per-sender monotonic so a gap is visible;
+* an unknown value tag is a decode error (`BadStmtValue`), never a guess - binding a guess writes a wrong value
+  into a live career.
+
+### The applier
+
+`coop-mem::stmtapply` turns a message into exactly one statement: `UPDATE <table> SET <cols> WHERE <pk> = <int>`.
+Three rules make string composition safe:
+
+1. **Identifiers are allowlisted**, not trusted - `[A-Za-z_][A-Za-z0-9_]*`, max 64 chars. A table named
+   `Player; DROP TABLE Player; --` is refused before any SQL exists.
+2. **Values are rendered as literals by type**, text quoted with internal quotes doubled, so a payload stays a
+   value. Non-finite floats become `NULL` rather than the words `NaN`, which SQLite would read as a column.
+3. **The `WHERE` column comes from the local catalogue, not the peer** - the peer says which row by value, the
+   local schema says which column identifies it. A peer cannot choose the predicate.
+
+### Tested two ways, deliberately
+
+The Rust unit tests assert the *shape* of the generated string. That is necessary and not sufficient: a subtler
+escaping bug would still produce a plausible-looking string. So `tools/stmt_injection_test.py` runs the generated
+statements through **real SQLite** and checks outcomes - 13 assertions including `7'); DROP TABLE Player; --`, a
+leading-quote payload, backslash-then-quote, an overflow literal and the bare word `NaN`. The table survives,
+unrelated rows are untouched, and every payload is stored as text. Registered as the `stmt` suite.
+
+That distinction is the point: "the escaping looks right" and "`DROP TABLE` did not happen" are different claims,
+and only the second is worth shipping on.
+
+### What is still missing
+
+The **producer**. `observe.js` sees 346 event names and turns six into coordination frames (§20); knowing a
+player pressed `DesignStageChanged` does not say which row the game will write, because the write happens inside
+the engine's SQLite. `CAREER-COOP-PLAN.md` §4.3 assumes a capture on the game's prepare path, and that is
+native/UFunction work needing the game running. The layer is now reachable, not complete - and the README says so
+rather than implying the career works.
 
 ---
 
@@ -853,7 +905,7 @@ was never checked, so the design's stated constraint (bandwidth) is not the real
 | **the resync path never resynced**: `split_frame` returned an empty frame that `drain(..0)` removed nothing of | medium - a corrupt header poisoned the stream forever; with the length cap it would have become a hot loop | **fixed**: `split_frame` returns `Result`, the reader clears and reports the drop |
 | a live-server test had a fixed 12 s deadline that starved under load | low - but a red result that may be noise trains people to ignore red | **fixed**: 60 s, overridable, fails fast if the server exits, and prints its output |
 | **`coop-link` wrote received saves to a hardcoded `SaveGames`**, while the game keeps one folder per profile | **high on another machine** - the transfer reports success and the save lands where the game never looks | **fixed**: picks the folder whose newest `.sav` is newest; tested on a synthetic layout and against the real one |
-| **the career layer is designed and not built**: nothing on the wire carries management state, so both players edit one DB and only the host's edits survive a save | **critical for the stated goal** - "a full career together" is not achievable as built, and Versus advertises a garage it cannot provide | recorded in §20 with the concrete next step (`Msg::Stmt` + a `prepare`-path capture), and a recommendation to stop promising it in the UI until it exists |
+| **the career layer is designed and not built**: nothing on the wire carries management state, so both players edit one DB and only the host's edits survive a save | **critical for the stated goal** - "a full career together" is not achievable as built, and Versus advertises a garage it cannot provide | **partly fixed (§22)**: `Msg::Stmt` carries a typed row change and `stmtapply` applies it as one bounded `UPDATE`, proven against real SQLite. The **producer** (capturing the game's own statements) is still missing and needs the game |
 | **~200 MiB/s is copied out of the game per snapshot** to build a 2.4 KiB frame (10.07 MiB read at 20 Hz) | medium - works, but the cost model was never checked, and a live test would blame the network | **fixed**: `read_cars_sparse` reads ~83 KiB per snapshot for identical output, behind `--sparse` |
 | `FRAME_GAP` was a 25 ms "rate limiter" that nothing read | low - a name that implies back-pressure that does not exist | **fixed**: removed, with the reason recorded where it lived |
 | `Mailbox::drain` indexed the shared buffer directly on the game thread | low (unreachable today) but the failure mode is the whole process | **fixed**: `get(..)` with a zero-entry fallback |

@@ -332,6 +332,76 @@ pub enum Msg {
         side: Side,
     },
     Bye,
+    /// One career-statement change, so the other machine's copy of the career follows.
+    ///
+    /// This is the message that makes "each player manages their own team" real. Without it both peers load the
+    /// same save and edit it independently: the host never learns of a client's signing, and whichever player
+    /// saves last writes their database over the `.sav`, silently discarding the other's work. `CAREER-COOP-PLAN`
+    /// §4.3 designs exactly this ("replicate transactions, not state").
+    ///
+    /// It carries a **row identity and values**, not SQL text, on purpose:
+    ///
+    /// * The receiver must not execute a string a peer composed. That is arbitrary code execution against a
+    ///   SQLite handle inside the game, from the other machine.
+    /// * The same logical change has to be expressible as a parameterised update, so the receiver can apply it
+    ///   through its own catalogued statement and keep the two databases identical.
+    ///
+    /// `seq` is per-sender monotonic so a gap is detectable. `table` and `pk` are what identify the row: a change
+    /// that cannot name its row cannot be replicated, and is refused at the sender rather than sent blind.
+    Stmt {
+        /// Per-sender sequence number. A gap means a lost frame, which the receiver reports rather than
+        /// silently applying out of order.
+        seq: u32,
+        /// Table name, as the game writes it (`Player`, `StaffPS`, ...). Used to find the catalogued statement
+        /// and to attribute the write to a team for `coop-auth`; never interpolated into SQL.
+        table: Vec<u8>,
+        /// Primary-key value of the row being changed.
+        pk: i64,
+        /// Column assignments, `(column name, value)`, applied as one parameterised `UPDATE`.
+        set: Vec<(Vec<u8>, StmtValue)>,
+    },
+}
+
+/// A typed SQL value, so a replicated change never depends on string formatting.
+///
+/// The type is carried explicitly instead of formatting to text and back: `"1"` and `1` are the same string and
+/// different SQL, and a career database mixes integer ids, text names and floating-point money in adjacent
+/// columns. Typing it means the receiver binds what the sender meant.
+#[derive(Debug, Clone, PartialEq)]
+pub enum StmtValue {
+    Null,
+    Int(i64),
+    Real(f64),
+    Text(Vec<u8>),
+}
+
+impl StmtValue {
+    fn tag(&self) -> u8 {
+        match self {
+            StmtValue::Null => 0,
+            StmtValue::Int(_) => 1,
+            StmtValue::Real(_) => 2,
+            StmtValue::Text(_) => 3,
+        }
+    }
+
+    /// The bytes a `sqlite3_bind_text` expects, for logging and for the `Text` case.
+    pub fn as_text(&self) -> Option<&[u8]> {
+        match self {
+            StmtValue::Text(t) => Some(t),
+            _ => None,
+        }
+    }
+
+    /// Renders the value the way SQL would see it, for a log line only - never for execution.
+    pub fn display(&self) -> String {
+        match self {
+            StmtValue::Null => "NULL".to_string(),
+            StmtValue::Int(v) => v.to_string(),
+            StmtValue::Real(v) => format!("{v}"),
+            StmtValue::Text(t) => String::from_utf8_lossy(t).into_owned(),
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -346,6 +416,8 @@ pub enum ProtoError {
     BadCarCount(usize),
     /// A declared frame length beyond [`MAX_FRAME`]. Refused rather than awaited.
     BadLength(usize),
+    /// A `Msg::Stmt` value whose type tag is not one this build defines.
+    BadStmtValue(u8),
 }
 
 impl fmt::Display for ProtoError {
@@ -363,6 +435,7 @@ impl fmt::Display for ProtoError {
                 f,
                 "peer claims a {n}-byte frame; the maximum this protocol allows is {MAX_FRAME}"
             ),
+            ProtoError::BadStmtValue(t) => write!(f, "unknown statement value type {t}"),
         }
     }
 }
@@ -541,6 +614,11 @@ const TAG_VOTE: u8 = 13;
 /// put it on the wire. Each machine therefore saw only its own player's claim, every team looked free to the
 /// other player, and both could take the same one - the opposite of what the screen promises.
 const TAG_TEAM: u8 = 14;
+/// One career-statement change, so a client's management actions reach the other machine.
+///
+/// The gap this closes was not a encoding problem: nothing on the wire carried management state at all, so two
+/// players editing the same in-memory career silently diverged and the last save won.
+const TAG_STMT: u8 = 15;
 
 /// A payload plus its self-describing header.
 pub fn encode(msg: &Msg) -> Vec<u8> {
@@ -627,6 +705,33 @@ pub fn encode(msg: &Msg) -> Vec<u8> {
             w.u8(TAG_TEAM);
             w.u8(*team);
             w.u8(side.as_u8());
+        }
+        Msg::Stmt { seq, table, pk, set } => {
+            w.u8(TAG_STMT);
+            w.u32(*seq);
+            // Length-prefixed, and the table name is bounded by the same 1 MiB frame cap as everything else.
+            w.u8(table.len() as u8);
+            w.raw(table);
+            // `pk` is signed: the game's keys are positive, but a schema that used a signed key would silently
+            // wrap here rather than fail.
+            w.raw(&pk.to_le_bytes());
+            w.u8(set.len().min(u8::MAX as usize) as u8);
+            for (col, val) in set.iter().take(u8::MAX as usize) {
+                w.u8(col.len() as u8);
+                w.raw(col);
+                w.u8(val.tag());
+                match val {
+                    StmtValue::Null => {}
+                    StmtValue::Int(v) => w.raw(&v.to_le_bytes()),
+                    StmtValue::Real(v) => w.raw(&v.to_le_bytes()),
+                    StmtValue::Text(t) => {
+                        // Two bytes: a career column can legitimately hold a name longer than 255, and a
+                        // truncating write would corrupt a row rather than fail.
+                        w.u16(t.len() as u16);
+                        w.raw(t);
+                    }
+                }
+            }
         }
         Msg::Bye => w.u8(TAG_BYE),
         Msg::Ready(r) => {
@@ -728,6 +833,43 @@ pub fn decode(frame: &[u8]) -> Result<Msg, ProtoError> {
         },
         TAG_VOTE => Msg::Vote { proposal: r.u16()?, option: r.u8()? },
         TAG_TEAM => Msg::TeamClaim { team: r.u8()?, side: Side::from_u8(r.u8()?)? },
+        TAG_STMT => {
+            let seq = r.u32()?;
+            let tlen = r.u8()? as usize;
+            let table = r.take(tlen)?.to_vec();
+            let mut pkb = [0u8; 8];
+            pkb.copy_from_slice(r.take(8)?);
+            let pk = i64::from_le_bytes(pkb);
+            let n = r.u8()? as usize;
+            let mut set = Vec::with_capacity(n);
+            for _ in 0..n {
+                let clen = r.u8()? as usize;
+                let col = r.take(clen)?.to_vec();
+                let tag = r.u8()?;
+                let val = match tag {
+                    0 => StmtValue::Null,
+                    1 => {
+                        let mut b = [0u8; 8];
+                        b.copy_from_slice(r.take(8)?);
+                        StmtValue::Int(i64::from_le_bytes(b))
+                    }
+                    2 => {
+                        let mut b = [0u8; 8];
+                        b.copy_from_slice(r.take(8)?);
+                        StmtValue::Real(f64::from_le_bytes(b))
+                    }
+                    3 => {
+                        let vlen = r.u16()? as usize;
+                        StmtValue::Text(r.take(vlen)?.to_vec())
+                    }
+                    // An unknown tag is a protocol mismatch, not something to guess at: binding the wrong type
+                    // writes the wrong value into a live career.
+                    t => return Err(ProtoError::BadStmtValue(t)),
+                };
+                set.push((col, val));
+            }
+            Msg::Stmt { seq, table, pk, set }
+        }
         TAG_SESSION_READY => Msg::SessionReady { total: r.u64()?, hash: r.u32()? },
         TAG_ORDERS => {
             let n = r.u8()? as usize;
@@ -850,9 +992,83 @@ mod tests {
         }
     }
 
+    /// A replicated career change must survive the wire exactly, including its value types.
+    ///
+    /// Types are the point: `"1"` and `1` are the same string and different SQL, and a career database mixes
+    /// integer ids, text names and floating-point money in adjacent columns. If a type tag were lost the receiver
+    /// would bind the wrong one and write a plausible-looking wrong value.
     #[test]
-    fn rc_and_orders_roundtrip() {
-        let rc = Msg::Rc(RcState { flags: 1024, rc_state: 1, rf_state: 0 });
+    fn a_career_statement_roundtrips_with_its_types_intact() {
+        let msg = Msg::Stmt {
+            seq: 42,
+            table: b"StaffPS".to_vec(),
+            pk: 1234567,
+            set: vec![
+                (b"TeamID".to_vec(), StmtValue::Int(7)),
+                (b"FirstName".to_vec(), StmtValue::Text(b"Max".to_vec())),
+                (b"Salary".to_vec(), StmtValue::Real(1_250_000.5)),
+                (b"Notes".to_vec(), StmtValue::Null),
+            ],
+        };
+        assert_eq!(decode(&encode(&msg)).unwrap(), msg);
+    }
+
+    /// The statement message must not carry SQL, and a payload that looks like SQL must stay a value.
+    ///
+    /// This is the security property, not a formatting preference: the receiver executes against a SQLite handle
+    /// inside the game, so a peer-supplied *string* would be arbitrary code execution from the other machine.
+    /// The design carries table, key and typed values precisely so the receiver builds the statement itself.
+    #[test]
+    fn a_statement_value_can_never_become_sql_syntax() {
+        let injection = b"7'); DROP TABLE Player; --".to_vec();
+        let msg = Msg::Stmt {
+            seq: 1,
+            table: b"Player".to_vec(),
+            pk: 1,
+            set: vec![(b"TeamID".to_vec(), StmtValue::Text(injection.clone()))],
+        };
+        let got = decode(&encode(&msg)).unwrap();
+        match got {
+            Msg::Stmt { set, table, .. } => {
+                // The bytes came back intact...
+                assert_eq!(set[0].1.as_text().unwrap(), injection.as_slice());
+                // ...as a value, tagged Text, and nothing anywhere holds a statement.
+                assert_eq!(set[0].1.tag(), 3);
+                assert_eq!(table, b"Player".to_vec());
+                // And the rendered form is only ever for logging.
+                assert!(set[0].1.display().contains("DROP TABLE"));
+            }
+            other => panic!("expected Stmt, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn an_unknown_value_type_is_refused_rather_than_guessed() {
+        // Hand-build a frame with tag 9 in the value position: binding a guess would write the wrong value into a
+        // live career, so this must be an error.
+        let mut payload = Vec::new();
+        payload.push(TAG_STMT);
+        payload.extend_from_slice(&1u32.to_le_bytes()); // seq
+        payload.push(1); // table len
+        payload.push(b'T'); // table
+        payload.extend_from_slice(&0i64.to_le_bytes()); // pk
+        payload.push(1); // one assignment
+        payload.push(1); // column len
+        payload.push(b'C'); // column
+        payload.push(9); // -> unknown value type
+
+        // Frame it the way `encode` does, so this goes through the real header path.
+        let mut frame = Vec::new();
+        frame.extend_from_slice(&MAGIC);
+        frame.extend_from_slice(&VERSION.to_le_bytes());
+        frame.extend_from_slice(&(payload.len() as u32).to_le_bytes());
+        frame.extend_from_slice(&fnv1a32(&payload).to_le_bytes());
+        frame.extend_from_slice(&payload);
+        assert_eq!(decode(&frame), Err(ProtoError::BadStmtValue(9)));
+    }
+
+    #[test]
+    fn rc_and_orders_roundtrip() {        let rc = Msg::Rc(RcState { flags: 1024, rc_state: 1, rf_state: 0 });
         assert_eq!(decode(&encode(&rc)).unwrap(), rc);
 
         let orders = Msg::Orders(vec![

@@ -23,6 +23,7 @@ pub mod loopstub;
 pub mod params;
 pub mod statements;
 pub mod retarget;
+pub mod stmtapply;
 
 
 const PROCESS_VM_READ: u32 = 0x0010;

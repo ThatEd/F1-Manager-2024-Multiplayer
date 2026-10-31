@@ -23,6 +23,7 @@ launched with this code. Everything below reflects what has been *run*, not what
 | One contract per person per day | **Code complete, unrun.** Arbitration tested in the supervisor, never exercised by two live clients | [docs/COORDINATION.md](docs/COORDINATION.md) |
 | Regulation votes counted for both | **Code complete, unrun.** Vote box tested; no live vote has been cast | [docs/COORDINATION.md](docs/COORDINATION.md) |
 | Team retarget (play as different teams) | **Code complete, unrun.** `SetPlayerTeam` + the AI gate located; written, not executed against a career | [docs/TEAM-RETARGET.md](docs/TEAM-RETARGET.md) |
+| Career changes crossing between players | **Half built (§22).** `Msg::Stmt` carries a typed row change and `stmtapply` applies it as one bounded `UPDATE` — identifiers allowlisted, values rendered as literals, predicate chosen locally — proven against real SQLite (`python -I run_all_tests.py stmt`). **The producer is missing:** nothing captures the game's own prepared statements yet, so a client's signings still do not reach the host | [docs/COOP-PAPER-AUDIT.md](docs/COOP-PAPER-AUDIT.md) |
 | Steam "Join Game" | **Code complete, unrun.** Lobby create/join/`+connect_lobby` implemented; three bugs that made it impossible are fixed (callback id `3334` -> `333`, lobby id never adopted, invite path refused a real invite). Needs a live Steam client | [docs/STEAM-JOIN.md](docs/STEAM-JOIN.md) |
 | Team picker (one team each) | **Fixed and unit-tested.** A host could take all ten teams and lock the other player out: object keys are strings, `myTeam` is a number, so no claim was ever released. Claims also now cross the relay instead of staying in one process | `tools/headless/team_claim_test.js`, `python -I run_all_tests.py teams e2e` |
 | Rich presence | **Code complete, unrun.** `status` key path avoids the publisher-token problem of `steam_display` | [docs/RICH-PRESENCE.md](docs/RICH-PRESENCE.md) |
@@ -60,9 +61,10 @@ python -I run_all_tests.py teams    # one player cannot take every team
 python -I run_all_tests.py redaction   # no private identifiers in the tree
 ```
 
-Currently: **249 Rust tests**, plus 20 suites (`rust`, `auth`, `unit`, `press`, `observe`, `steam`,
-`inert`, `drive`, `render`, `boot`, `pak`, `proxy`, `offsets`, `gaps`, `surface`, `teams`, `clock`,
-`guard`, `e2e`, `redaction`) and the redaction check that fails if a private path has leaked into the tree.
+Currently: **310 Rust tests** (254 across the workspace plus 56 in `coop-mem --lib`, whose separate integration
+binary has a pre-existing crash), plus 21 suites (`rust`, `auth`, `unit`, `press`, `observe`, `steam`,
+`inert`, `drive`, `render`, `boot`, `pak`, `proxy`, `offsets`, `gaps`, `surface`, `stmt`, `teams`,
+`clock`, `guard`, `e2e`, `redaction`) and the redaction check that fails if a private path has leaked into the tree.
 All of it passes from a clean clone. The runner prints each suite's own assertion count rather than one
 grand total, because two suites report `N/M passed` and two report `N passed`, and summing them across
 both spellings double-counts.

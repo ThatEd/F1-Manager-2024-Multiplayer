@@ -179,6 +179,13 @@ if shutil.which("node"):
     # the docs is checkable rather than copied from prose.
     suite("surface", [sys.executable, "-I", os.path.join(TOOLS, "event_surface.py")],
           HERE, lambda out: "OK: measured surface matches" in out or out.strip().startswith("SKIP"))
+
+    # A replicated career statement becomes SQL text, because the only write path available hands one string to
+    # sqlite3_exec. String assertions prove the shape; this runs the result through real SQLite and proves a peer's
+    # payload is data rather than syntax - the difference between "the escaping looks right" and "DROP TABLE did
+    # not happen".
+    suite("stmt", [sys.executable, "-I", os.path.join(TOOLS, "stmt_injection_test.py")],
+          HERE, lambda out: passed_count(out, 12))
     # One player must not be able to take every team. Reported as "player 1 being able to take every team and
     # locking them", caused by comparing a string object key against a number - always unequal, so no claim
     # was ever released. This extracts and runs the real `pickTeam` body, so a copy cannot drift from the source.
