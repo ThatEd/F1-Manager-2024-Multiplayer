@@ -989,9 +989,36 @@ dereferenced; an unterminated buffer is refused rather than truncated; and - bec
 shipped a complete-but-uncalled module once - **the wiring itself is asserted**, so a hook that installs without
 registering its sink cannot pass.
 
+### The prologue check, disassembled rather than assumed
+
+`install_exec` compares five known bytes at the target. That proves *what* is there, not that those five bytes are
+**whole instructions** - and a trampoline that resumes at `target+5` inside an instruction is a crash. So the bytes
+were disassembled (capstone) instead of reasoned about:
+
+```
+sqlite3_exec   ok: 1 instruction(s),  5 bytes  (mov qword ptr [rsp + 0x20], r9)
+simulate       ok: 3 instruction(s),  5 bytes  (push rbx; push rsi; push r13)
+```
+
+`sqlite3_exec` is the ideal case - it opens with a single five-byte store. `simulate`, the already-proven hook,
+opens with three pushes totalling exactly five. Both boundaries hold, which is what the trampoline depends on.
+
+`tools/verify_sqlite.py` now checks this on every run, including that the bytes match the constant the Rust checks,
+and fails with a named reason if a future build has a different instruction shape. It skips cleanly when capstone
+is absent, saying so rather than implying a pass.
+
+**A self-inflicted detour worth recording:** writing that block, I truncated the file at the wrong offset and
+deleted its `if __name__ == "__main__"` entry point. The symptom was a script that exited 0 with **no output at
+all** - which looked like a swallowed stdout problem and cost several runs before checking the obvious thing. If a
+tool prints nothing and exits 0, suspect the entry point before the plumbing.
+
 **Not yet proven:** that `sqlite3_exec`'s prologue on the installed build is the five bytes this expects. That is
 checked at install time against the live process and refused with a message if it differs - the same protection
 the sim hook has - but the constant itself has only been confirmed against the file.
+
+*Settled since:* the bytes are confirmed against the file **and disassembled**, showing the first instructions at
+both hook sites total exactly the five bytes the patch steals. See "The prologue check, disassembled rather than
+assumed" below.
 
 ---
 

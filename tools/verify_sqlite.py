@@ -38,6 +38,8 @@ DEFAULT_EXEC_RVA = 0x156D300
 EXEC_PATTERN = bytes([0x41, 0xB9, 0xEF, 0xFF, 0x01, 0x00, 0x4C, 0x8D, 0x05])
 EXEC_PROLOGUE = bytes([0x4C, 0x89, 0x4C, 0x24, 0x20])
 REWIND = 0x6C
+# How many bytes the inline hook steals, from the Rust `STOLEN`. The prologue constant is exactly this long.
+STOLEN = len(EXEC_PROLOGUE)
 
 
 class Pe:
@@ -163,12 +165,58 @@ def main():
       composed it, and it cannot distinguish a career write from a query - but it is a real path to the data
       `Msg::Stmt` needs, using an address already proven to be findable.""")
 
+    # ---- 4. the stolen bytes must end on an instruction boundary --------------------------------
+    # A 5-byte patch is only safe if the first instructions at the target total exactly 5 bytes. Otherwise the
+    # trampoline resumes at target+5 in the middle of an instruction, and the game crashes in a way that looks like
+    # a corrupted install. `install` and `install_exec` compare known bytes, which proves *what* is there but not
+    # that it is whole instructions - so this checks the property the trampoline actually depends on.
+    #
+    # Measured for this build: `sqlite3_exec` opens with a single instruction, `mov qword ptr [rsp+0x20], r9`;
+    # `simulate` opens with `push rbx; push rsi; push r13`. Both total exactly 5.
+    print()
+    print("Stolen-byte boundaries (the trampoline resumes at target+5):")
+    try:
+        import capstone
+    except ImportError:
+        print("  SKIP: capstone not installed (`pip install capstone`) - cannot verify instruction boundaries")
+        capstone = None
+    if capstone is not None:
+        md = capstone.Cs(capstone.CS_ARCH_X86, capstone.CS_MODE_64)
+        for name, rva, expect in (
+            ("sqlite3_exec", args.expect_exec_rva, EXEC_PROLOGUE),
+            ("simulate", 0x2298080, bytes([0x40, 0x53, 0x56, 0x41, 0x55])),
+        ):
+            off = pe.rva_to_off(rva)
+            if off is None:
+                print("  %-14s RVA 0x%X is not in the file" % (name, rva))
+                failures.append("%s not mapped" % name)
+                continue
+            buf = data[off:off + 24]
+            total, insns = 0, []
+            for ins in md.disasm(buf, rva):
+                insns.append("%s %s" % (ins.mnemonic, ins.op_str))
+                total += ins.size
+                if total >= STOLEN:
+                    break
+            if buf[:STOLEN] != expect:
+                print("  %-14s FAIL: bytes do not match the constant the hook checks" % name)
+                failures.append("%s prologue" % name)
+            elif total != STOLEN:
+                print("  %-14s FAIL: instructions total %d bytes but the patch steals %d - the trampoline "
+                      "would resume mid-instruction" % (name, total, STOLEN))
+                failures.append("%s boundary" % name)
+            else:
+                print("  %-14s ok: %d instruction(s), %d bytes (%s)"
+                      % (name, len(insns), total, "; ".join(insns)))
+
     print()
     if failures:
         print("FAIL: %s" % ", ".join(failures))
         return 1
-    print("OK: the recorded sqlite3_exec address is right for this build.")
+    print("OK: the recorded sqlite3_exec address is right for this build, and both hook sites")
+    print("    begin with whole instructions.")
     return 0
+
 
 
 if __name__ == "__main__":
