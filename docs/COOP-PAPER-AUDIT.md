@@ -1051,15 +1051,28 @@ Auditing *features the UI offers* against *what the code does*, rather than audi
 > forgetting it looks exactly like a broken mod.
 
 That was fixed for the **supervisor**, which now runs as a thread inside the agent. It was **not** fixed for
-`coop-link`, which is the process that actually reads the sim and sends car frames: `Command::new` spawning
-`coop-link` appears **zero** times in the whole workspace. So the host armed the hook, the loopback relay came up,
-and nothing ever published - the exact symptom the comment describes, just moved one process along. This is the
-owner's complaint ("we do not want the server to be a separate launch") restated in code.
+`coop-link`, which is the process that actually moves car frames: `Command::new` spawning `coop-link` appears
+**zero** times in the whole workspace. So the host armed the hook, the loopback relay came up, and nothing ever
+published - the exact symptom the comment describes, just moved one process along. This is the owner's complaint
+("we do not want the server to be a separate launch") restated in code.
 
-Fixed: `POST /coop/host` now calls `ensure_publisher`, which launches `coop-link.exe --role host` from beside the
-agent. Guarded three ways - host role only (a client machine may not ship the binary), once per process, and only
-if the file exists - and every failure is reported as its own JSON field rather than folded into "Hosting", because
-a publisher that did not start and a hook that is not armed need different fixes and looked identical before.
+**And it is not only the host.** The first version of this fix started a publisher for the host only, which is
+half a fix. The client's `coop-link` runs in the *opposite* direction: it connects to the agent's write port and
+writes received frames through the mailbox (`run_client_once` → `WriteChannel::new(agent_address())`). A client
+with no link therefore receives **nothing at all** - and "the client sees no cars" is indistinguishable from "the
+host is not sending". Both roles now start their own link, from `POST /coop/host` and `POST /coop/join`
+respectively.
+
+Guarded per role (one `AtomicBool` each, so hosting then joining in one session starts both), once per process,
+and only if `coop-link.exe` exists beside the agent. Every failure is reported as its own JSON field rather than
+folded into "Hosting", because a link that did not start and a hook that is not armed need different fixes and
+looked identical before. The supervisor address comes from `coop_supervisor::DEFAULT_PORT`, not a literal, so it
+cannot drift from the port the in-process relay binds.
+
+**A test caught my own one-sided fix.** The assertion originally read "the client must not start a publisher" -
+written from the host-only mental model - and it failed the moment the client path was added. Correcting the test
+rather than the code was the right call (the client genuinely needs one), but it is worth recording that the test
+was wrong in the same direction as the code.
 
 ### 25.2 The host's save arrived and nobody was told
 
@@ -1114,7 +1127,7 @@ here because the fix is a design decision, not a patch.
 | **~200 MiB/s is copied out of the game per snapshot** to build a 2.4 KiB frame (10.07 MiB read at 20 Hz) | medium - works, but the cost model was never checked, and a live test would blame the network | **fixed**: `read_cars_sparse` reads ~83 KiB per snapshot for identical output, behind `--sparse` |
 | `FRAME_GAP` was a 25 ms "rate limiter" that nothing read | low - a name that implies back-pressure that does not exist | **fixed**: removed, with the reason recorded where it lived |
 | **incidents and faults are not replicated at all**: the wire carries car *positions*, so each sim rolls its own dice and the two races contain different events | **critical for "watch the same race"** - the most user-visible failure left | **open** (§24): `RNG-DETERMINISM.md` §5.2 specifies the replay format and nothing implements it. Blocked on locating the roll site, which is `unknown` and needs the live process |
-| **the frame publisher was still a separate launch**: `coop-link` is spawned by nothing, so the host armed the hook and nothing published | **high** - the exact symptom ("looks like a broken mod") the in-process relay was built to remove, one process along | **fixed** (§25.1): `POST /coop/host` starts `coop-link.exe`, with the failure reported as its own field |
+| **the frame publisher was still a separate launch**: `coop-link` is spawned by nothing, so the host armed the hook and nothing published | **high** - the exact symptom ("looks like a broken mod") the in-process relay was built to remove, one process along | **fixed** (§25.1): `POST /coop/host` **and** `/coop/join` each start their own link - the client's runs the opposite direction, so a host-only fix left it receiving nothing |
 | **a received save arrived and the UI never said so** | **high** - a whole test session lost with no error anywhere; the client kept playing the old career | **fixed** (§25.2): recorded beside the agent log, reported as `session_save`, and the menu says to load it |
 | custom teams (`EF1Team.CustomTeam = 32`) cannot be selected or claimed; the picker is `[1..10]` | low - unsupported and unexplained, not unsafe | **open** (§25.3): a design decision (one shared slot), so the UI should say custom teams are single-player-only |
 | `Mailbox::drain` indexed the shared buffer directly on the game thread | low (unreachable today) but the failure mode is the whole process | **fixed**: `get(..)` with a zero-entry fallback |

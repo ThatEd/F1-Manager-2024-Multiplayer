@@ -525,6 +525,13 @@
             agent("join", "POST")
                 .then(function (st) {
                     self.setState({ armed: !!st.armed });
+                    // A client that is not receiving anything looks identical to a client whose host is not
+                    // sending. Report it as its own failure so the two are distinguishable.
+                    var pub = st.publisher || {};
+                    if (pub.error) {
+                        self.setStatus("joined, but the frame receiver did not start: " + pub.error, true);
+                        return;
+                    }
                     // The host's save arriving is the one fact that changes what the client should do next, and it
                     // used to be invisible: the file was transferred and hash-verified, and the UI said nothing, so
                     // the player had no reason to think their career was out of date. Say it, and say the action.

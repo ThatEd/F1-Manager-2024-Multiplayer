@@ -1617,7 +1617,7 @@ fn lobby_host_body() -> String {
     // unsolved for `coop-link`, which is the process that actually reads the sim and sends car frames. Without it
     // the host arms the hook, the loopback relay is up, and nothing ever publishes, which looks exactly like a
     // broken mod.
-    let publisher = ensure_publisher(agent_side() == coop_proto::Side::Host);
+    let publisher = ensure_publisher(coop_proto::Side::Host);
     format!(
         "{{\"role\":\"host\",\"armed\":{},\"hook_installed\":{},\"callback_registered\":{},\
           \"hook_fires\":{},\"rc_flags\":{},\"rc_state\":{},\"rf_state\":{},\"write_port\":{},\
@@ -1634,22 +1634,31 @@ fn lobby_host_body() -> String {
     )
 }
 
-/// Starts `coop-link` in the host role if it is not already running, and reports what happened as a JSON string.
+/// Starts `coop-link` if it is not already running, and reports what happened as a JSON string.
 ///
-/// Why here: the menu's "Host" button is the moment the player has declared intent, and the agent is already inside
-/// the game, so it can start the publisher itself. Every alternative - a shortcut, a `.bat`, a line in a readme -
-/// is a second thing to launch and forget, and forgetting it is indistinguishable from a broken mod.
+/// Why here: the menu's Host/Join button is the moment the player has declared intent, and the agent is already
+/// inside the game, so it can start the publisher itself. Every alternative - a shortcut, a `.bat`, a line in a
+/// readme - is a second thing to launch and forget, and forgetting it is indistinguishable from a broken mod.
 ///
-/// Guarded three ways: only in the host role, only if the binary is actually beside the agent (a client machine
-/// does not need it), and only once per process. A failure is reported rather than raised, because a missing
-/// publisher must not make "Host" itself look like it failed - the sim side is still armed and the player can be
-/// told separately.
-fn ensure_publisher(is_host: bool) -> String {
-    if !is_host {
-        return "{\"started\":false,\"reason\":\"not the host\"}".to_string();
-    }
-    if PUBLISHER_STARTED.swap(true, Ordering::SeqCst) {
-        return "{\"started\":false,\"reason\":\"already started by this process\"}".to_string();
+/// **Both roles need one, for opposite reasons.** The host's `coop-link` reads the sim and sends frames out. The
+/// client's reads frames in and writes them through the agent's mailbox. Only the host's was ever started, so a
+/// client received nothing at all - and "the client sees no cars" looks exactly like "the host is not sending".
+///
+/// Guarded three ways: only once per process, only if the binary is actually beside the agent (a package may omit
+/// it), and every failure is reported rather than raised, because a missing publisher must not make Host/Join
+/// itself look like it failed - the sim side is still armed and the player can be told separately.
+fn ensure_publisher(side: coop_proto::Side) -> String {
+    let role = match side {
+        coop_proto::Side::Host => "host",
+        coop_proto::Side::Client => "client",
+    };
+    let key = match side {
+        coop_proto::Side::Host => 0,
+        coop_proto::Side::Client => 1,
+    };
+    // One flag per role: a machine can host once and then join, and the second role needs its own publisher.
+    if PUBLISHER_STARTED[key].swap(true, Ordering::SeqCst) {
+        return format!("{{\"started\":false,\"role\":\"{role}\",\"reason\":\"already started\"}}");
     }
     let exe_dir = match std::env::current_exe().ok().and_then(|p| p.parent().map(|d| d.to_path_buf())) {
         Some(d) => d,
@@ -1657,22 +1666,23 @@ fn ensure_publisher(is_host: bool) -> String {
     };
     let bin = exe_dir.join("coop-link.exe");
     if !bin.exists() {
-        // The client machine's package may omit it. Say so instead of pretending.
         return format!(
-            "{{\"started\":false,\"error\":\"coop-link.exe not found beside the agent ({})\"}}",
+            "{{\"started\":false,\"role\":\"{role}\",\"error\":\"coop-link.exe not found beside the agent ({})\"}}",
             bin.display()
         );
     }
-    let port = write_port();
-    let _ = port; // coop-link discovers the write port from the agent's side file; no flag for it.
     let mut cmd = std::process::Command::new(&bin);
     // Exactly the flags `coop-link` defines: `--role`, `--supervisor`, `--pid`. Passing a flag it does not
     // understand would be silently ignored (its parser takes what it knows), so an invented one is worse than none.
+    //
+    // The supervisor address comes from `DEFAULT_PORT` rather than a literal, because the in-process relay binds
+    // that constant and a divergence would show up as "the publisher connects to nothing".
     cmd.arg("--role")
-        .arg("host")
+        .arg(role)
         .arg("--supervisor")
         .arg(format!("127.0.0.1:{}", coop_supervisor::DEFAULT_PORT))
         .arg("--pid")
+        // The agent runs inside the game, so this *is* the game's pid - which is what `--pid` wants.
         .arg(std::process::id().to_string());
     // Detached: the publisher outlives this call but not the game, and it must not inherit the game's console.
     #[cfg(windows)]
@@ -1683,19 +1693,23 @@ fn ensure_publisher(is_host: bool) -> String {
     }
     match cmd.spawn() {
         Ok(child) => {
-            log(&format!("started the frame publisher (pid {}) from {}", child.id(), bin.display()));
-            format!("{{\"started\":true,\"pid\":{}}}", child.id())
+            log(&format!(
+                "started the {role} frame link (pid {}) from {}",
+                child.id(),
+                bin.display()
+            ));
+            format!("{{\"started\":true,\"role\":\"{role}\",\"pid\":{}}}", child.id())
         }
         Err(e) => {
-            PUBLISHER_STARTED.store(false, Ordering::SeqCst);
-            log(&format!("could not start the frame publisher: {e}"));
-            format!("{{\"started\":false,\"error\":\"{e}\"}}")
+            PUBLISHER_STARTED[key].store(false, Ordering::SeqCst);
+            log(&format!("could not start the {role} frame link: {e}"));
+            format!("{{\"started\":false,\"role\":\"{role}\",\"error\":\"{e}\"}}")
         }
     }
 }
 
-/// Set once the publisher has been launched, so repeated menu visits do not spawn a process each time.
-static PUBLISHER_STARTED: AtomicBool = AtomicBool::new(false);
+/// One flag per side, so hosting then joining in one session starts both links rather than only the first.
+static PUBLISHER_STARTED: [AtomicBool; 2] = [AtomicBool::new(false), AtomicBool::new(false)];
 
 /// JSON for `POST /coop/join`: a client's view, which is what the second player needs before a race.
 ///
@@ -1707,6 +1721,10 @@ fn lobby_join_body() -> String {
     let block = hook::block();
     let (fires, cb) = hook::state();
     let mode = tyre_mode();
+    // The client needs a link too, in the opposite direction: its `coop-link` reads frames in and writes them
+    // through this agent's mailbox. Only the host's was ever started, so a client received nothing - and "the
+    // client sees no cars" is indistinguishable from "the host is not sending".
+    let publisher = ensure_publisher(coop_proto::Side::Client);
     let session = match received_session() {
         Some(name) => format!("\"{}\"", name.replace('\\', "\\\\").replace('"', "\\\"")),
         None => "null".to_string(),
@@ -1714,7 +1732,7 @@ fn lobby_join_body() -> String {
     format!(
         "{{\"role\":\"client\",\"armed\":{},\"hook_installed\":{},\"callback_registered\":{},\
           \"hook_fires\":{},\"frames_applied\":{},\"entries_written\":{},\"tyre_mode\":\"{}\",\
-          \"write_port\":{},\"session_save\":{}}}",
+          \"write_port\":{},\"session_save\":{},\"publisher\":{}}}",
         block.is_some() && cb != 0,
         block.is_some(),
         cb != 0,
@@ -1723,7 +1741,8 @@ fn lobby_join_body() -> String {
         mailbox().stats().2,
         mode.as_str(),
         write_port(),
-        session
+        session,
+        publisher
     )
 }
 

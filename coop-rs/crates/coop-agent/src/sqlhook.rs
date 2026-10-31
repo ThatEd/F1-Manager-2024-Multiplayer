@@ -235,33 +235,51 @@ mod tests {
         );
     }
 
-    /// The host tab must start the frame publisher itself.
+    /// Both roles must start their own frame link, and the failure must be reported per role.
     ///
-    /// This is the defect the owner named twice - "we do not want the server to be a separate launch". The
-    /// in-process relay solved it for the supervisor, and the same problem was left unsolved for `coop-link`,
-    /// which is the process that actually reads the sim. A hook armed with nothing publishing is
-    /// indistinguishable from a broken mod, and nothing in the log says which it is.
+    /// This is the defect the owner named: "we do not want the server to be a separate launch". The in-process
+    /// relay solved it for the supervisor; the same problem was left for `coop-link`, which is the process that
+    /// actually moves car frames. A hook armed with nothing publishing is indistinguishable from a broken mod.
+    ///
+    /// **And it is not only the host.** The client's `coop-link` runs in the opposite direction - it reads frames
+    /// in and writes them through this agent's write port - so a client with no link receives nothing at all, and
+    /// "the client sees no cars" looks exactly like "the host is not sending". An earlier version of this test
+    /// asserted the client must *not* start one; that was wrong and would have shipped a one-sided fix.
     #[test]
-    fn the_host_path_starts_the_frame_publisher() {
+    fn both_roles_start_their_frame_link() {
         let src = include_str!("lib.rs");
-        let at = src.find("fn lobby_host_body").expect("host body present");
-        let body = &src[at..(at + 1200).min(src.len())];
+        let host = src.find("fn lobby_host_body").expect("host body present");
+        let host_body = &src[host..(host + 1400).min(src.len())];
         assert!(
-            body.contains("ensure_publisher"),
-            "becoming the host must start coop-link, or the player has to launch it by hand"
+            host_body.contains("ensure_publisher(coop_proto::Side::Host)"),
+            "Host must start its link, or the player has to launch it by hand"
         );
+        let join = src.find("fn lobby_join_body").expect("join body present");
+        let join_body = &src[join..(join + 2000).min(src.len())];
+        assert!(
+            join_body.contains("ensure_publisher(coop_proto::Side::Client)"),
+            "Join must start the client's link too; without it the client receives nothing"
+        );
+
         let pf = src.find("fn ensure_publisher").expect("ensure_publisher present");
-        let pbody = &src[pf..(src.len()).min(pf + 3000)];
+        let pbody = &src[pf..(src.len()).min(pf + 3500)];
         assert!(pbody.contains("coop-link.exe"), "it must look for the real binary");
         assert!(
-            pbody.contains("PUBLISHER_STARTED"),
-            "and be guarded, so repeated menu visits do not spawn a process each time"
+            pbody.contains("PUBLISHER_STARTED[key]"),
+            "and be guarded per role, so repeated menu visits do not spawn a process each time"
         );
-        // Only the host publishes; a client machine may not even ship the binary.
-        assert!(pbody.contains("is_host"), "the client must not start a publisher");
+        assert!(
+            pbody.contains("DEFAULT_PORT"),
+            "the supervisor address must come from the constant the relay binds, not a literal"
+        );
         assert!(
             pbody.contains("not found"),
             "a missing binary must be reported by name rather than silently ignored"
+        );
+        // One flag per side, so hosting then joining in one session starts both.
+        assert!(
+            src.contains("static PUBLISHER_STARTED: [AtomicBool; 2]"),
+            "the guard must be per role; a single flag would block the second role"
         );
     }
 
