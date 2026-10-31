@@ -62,9 +62,9 @@ async function open(appId, quiet = true) {
   const eng = readModule(l, 'common/core/Engine');
   const ready = await l.waitFor(() => {
     try { return eng.isCoherentPlayer() === true; } catch (_) { return false; }
-  }, { maxMs: 8000 });
+  }, { maxMs: 20000 });
   if (!ready.ok) throw new Error('engine not ready');
-  await l.waitFor(() => l.document.body.childNodes.length > 0, { maxMs: 12000 });
+  await l.waitFor(() => l.document.body.childNodes.length > 0, { maxMs: 30000 });
   await l.tick(1600);
 
   const sent = [];
@@ -247,17 +247,22 @@ async function run() {
       const list = P.list();
       return list.some((s) => /ContinueButton_root/.test(s) && /PRE_SESSION_RACE_START/i.test(s));
     };
-    let appeared = await l.waitFor(raceStartReady, { maxMs: 4000 });
+    let appeared = await l.waitFor(raceStartReady, { maxMs: 15000 });
     if (!appeared.ok) {
       // Force a re-render now that the data is in place, then look again.
       try { P.seedDefaults(DS); } catch (_) { }
       nav.setDefault(-1);
       eng2.sendEvent('SetRaceView', 0);
       await l.tick(1200);
-      appeared = await l.waitFor(raceStartReady, { maxMs: 4000 });
+      appeared = await l.waitFor(raceStartReady, { maxMs: 15000 });
     }
+    // 4000ms was not enough when the whole suite ran concurrently: this is a real headless render of
+    // RaceWeekendApp, and under load it took longer than four seconds. A fixed budget on a cost that varies
+    // with machine load fails for reasons unrelated to what it tests - the same defect that made a live-server
+    // suite report "timed out" after a Rust build. The render is deterministic, just slow when starved, so the
+    // budget is generous and the failure message says what it actually saw.
     ok(appeared.ok, 'the race-start confirm appeared on PreSession',
-      appeared.ok ? '' : `waited; saw ${(P.list().filter((s) => /Continue/.test(s))[0] || 'nothing')}`);
+      appeared.ok ? '' : `waited 30s across two attempts; saw ${(P.list().filter((s) => /Continue/.test(s))[0] || 'nothing')}`);
     if (appeared.ok) {
       const before = sent.length;
       const r = await invoke(P, 'press', 'advance');
