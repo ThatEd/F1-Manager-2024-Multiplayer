@@ -354,18 +354,24 @@
         {
             id: "shared-team",
             label: "Shared team",
-            detail: "One garage, two drivers. Each player runs their own car; facilities, research and the budget come from the host.",
+            detail: "One garage, two drivers. Each player runs their own car; the budget and facilities are the host's.",
         },
         {
             id: "versus",
             label: "Versus",
-            detail: "A team each, racing the other player. Shared calendar and results, your own garage.",
+            detail: "A team each, racing the other player. Shared calendar, results and race.",
         },
         /*
          * There were three modes here. "Co-op career" was removed: it is the same shape as Versus for the
          * only thing that differs (whose team the save belongs to), and the game's data model has exactly one
          * `Player` row with one `TeamID`, so a genuinely third arrangement would be a lie the engine cannot
          * honour - see docs/TEAM-RETARGET.md. Two choices that both work beat three where one is unimplemented.
+         *
+         * The detail strings say only what the build delivers today. Versus used to promise "your own garage",
+         * which is statement replication - the career layer's transport (Msg::Stmt) and safe applier exist, but
+         * the producer only *reports* what the game writes and is not wired end to end, so a client's signings
+         * do not yet reach the host. Promising it would be the same kind of lie the removed third mode was, so
+         * the claim goes back in when the wiring lands. See docs/COOP-PAPER-AUDIT.md sections 20 and 23.
          */
     ];
 

@@ -751,6 +751,29 @@ engine's own prepare/bind path, exactly as `CAREER-COOP-PLAN.md` §4.3 assumes, 
 
 ### The two modes in the UI, judged against that
 
+`lobby.js:353-370` offers exactly two, and their detail strings make specific promises:
+
+| mode | the UI's own words | does the build deliver it? |
+|---|---|---|
+| **Shared team** | *"One garage, two drivers. Each player runs their own car; facilities, research and the budget come from the host."* | **Partly.** Shared clock, calendar and race weekend work; `coop-auth` enforces per-car ownership so each player edits only their own car. But "comes from the host" describes *snapshot ownership*, not replication - and the two players' **setup and development work still does not cross**, so a client's changes to their car are lost at the next save unless the host made them. |
+| **Versus** | *"A team each, racing the other player. Shared calendar and results, your own garage."* | **No.** "Your own garage" is exactly statement replication, and until the producer in §23 was built there was no path for it at all. With it, the pieces now exist (capture → `Msg::Stmt` → `stmtapply`) but are **report-only** and not wired end to end. The claim is ahead of the build. |
+
+The comment above `MODES` is honest about a related decision - `CoopCareer` was removed because "the game's data
+model has exactly one `Player` row with one `TeamID`, so a genuinely third arrangement would be a lie the engine
+cannot honour". That reasoning is right. The same test applied to the two remaining modes says **Versus's detail
+text is currently a lie of the same kind**, and Shared team's is optimistic about development.
+
+**Recommendation, and it is a one-line change to each string:** until §23's producer is wired end to end, Versus
+should say *"A team each, racing the other player. Shared calendar, results and race. Career changes sync from the
+host."* - which is true today. Shared team should drop the implication that a client's research and facilities work
+carries over. Neither change touches code, only `lobby.js`'s `MODES` array, so it is cheap to do and cheap to
+revert once the wiring lands.
+
+**Also worth noting:** `SAVE-MERGE-PLAN.md` describes a *merge* as the long-term model, which is a different
+answer to the same question §20 asks. It is not implemented either, and the snapshot model in `LOBBY-GATE.md` is
+what the code does. Two documents describe two different career architectures and only one is built; that should be
+said once, plainly, so a future session does not build toward the wrong one. **The built one is the snapshot.**
+
 `lobby.js:355-361` offers exactly two:
 
 | mode | what the UI promises | does it work on paper? |
