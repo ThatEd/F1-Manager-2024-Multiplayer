@@ -337,30 +337,105 @@ def install_proxy(game_root: str, label: str = 'host') -> list[str]:
     dst = os.path.join(bin_dir, 'version.dll')
     shutil.copy2(proxy, dst)
 
-    # The agent is only loaded when this marker exists, so installing the proxy is a **no-op** until co-op is
-    # switched on. That is deliberate: a proxy that stops the game launching is the worst failure this mod can
-    # produce and it happened once, so the safe state has to be the state a fresh install lands in.
+    # The forwarder loads `coop_agent.dll` by bare name, which Windows resolves from the exe's own directory. So the
+    # agent has to be *here*: installing the proxy alone produced a machine with a correct `version.dll` and no
+    # agent in the process, and the only evidence was a line in `coop_proxy.log`. Caught by deploying into a scratch
+    # game root and listing what actually arrived.
+    agent = _find_release('coop_agent.dll')
+    if agent is None:
+        return ['coop_agent.dll not built - run: cargo build --release -p coop-agent']
+    shutil.copy2(agent, os.path.join(bin_dir, 'coop_agent.dll'))
+    print('  installed agent (%d bytes)' % os.path.getsize(os.path.join(bin_dir, 'coop_agent.dll')))
+
+    # `coop-link.exe` is spawned by the agent on Host/Join, so it must sit beside the agent too.
+    link = _find_release('coop-link.exe')
+    if link is None:
+        return ['coop-link.exe not built - run: cargo build --release -p coop-link']
+    shutil.copy2(link, os.path.join(bin_dir, 'coop-link.exe'))
+    print('  installed frame link (%d bytes)' % os.path.getsize(os.path.join(bin_dir, 'coop-link.exe')))
+
+    # Write the enable marker ourselves. Without it the forwarder loads and forwards, and never loads the agent -
+    # by design, because a proxy that stops the game launching is the worst failure this mod can produce. But
+    # "safe by default" and "deployed means working" are different claims, and leaving the marker out made a
+    # correct deploy indistinguishable from a broken one: the menu appeared, nothing was armed, every log clean.
+    #
+    # Ordered after the copy and after the export check, so the marker can only exist beside a proven proxy.
     marker = os.path.join(bin_dir, 'coop_proxy.enable')
-    if not os.path.exists(marker):
-        # No marker is the intended default; say so, because a player who sees no co-op menu will otherwise
-        # assume the install failed.
-        print('  note: %s loads the forwarder only (coop_proxy.enable absent).' % label)
-        print('        Create %s to let it load the agent.' % marker)
+    try:
+        with open(marker, 'w', encoding='utf-8') as f:
+            f.write('enables the co-op auto-loader; delete this file to make version.dll inert\n')
+        print('  enabled auto-loader')
+    except OSError as exc:
+        return ['could not write %s: %s' % (marker, exc)]
+
+    # The sim hook is a separate opt-in, because a wrong patch is an instant crash with no dump. Written here for
+    # the same reason: `armed` is false without it, so Host reports "no hook installed" and nothing tells the
+    # player that a file is what is missing. Reversible by deleting it; the hook validates the prologue first.
+    hook_marker = os.path.join(bin_dir, 'coop_hook.enable')
+    try:
+        with open(hook_marker, 'w', encoding='utf-8') as f:
+            f.write('enables the sim hook; delete this file to leave the game untouched\n')
+        print('  enabled sim hook')
+    except OSError as exc:
+        print('  ! could not write %s: %s' % (hook_marker, exc))
+        print('    Hosting will report "no hook installed" until it exists.')
     return []
+
+
+def install_coop_auth_files(game_root: str, mode: str, team: int, loadout: int,
+                            is_host: bool, label: str = 'host') -> list:
+    """Write `coop_mode.txt` and `coop_player.txt`, which `coop-auth` reads and nothing else creates.
+
+    `coop_auth::configured()` returns `None` when either file is absent, and every gate then passes. That is the
+    right default for single-player maintenance and the wrong state for a co-op session: the team rules were
+    documented, implemented and tested, and enforced nothing in practice because no code ever wrote the two files
+    they read. Verified - no writer existed anywhere in the tree.
+
+    Written last, after the pak and the proxy, so the mode rules only come into force once the session is
+    actually deployable.
+    """
+    bin_dir = os.path.join(game_root, 'F1Manager24', 'Binaries', 'Win64')
+    problems = []
+    try:
+        with open(os.path.join(bin_dir, 'coop_mode.txt'), 'w', encoding='utf-8') as f:
+            f.write(mode + '\n')
+    except OSError as exc:
+        problems.append('could not write coop_mode.txt: %s' % exc)
+    # `team loadout host|client` on one line, which is the shape `configured()` parses.
+    try:
+        with open(os.path.join(bin_dir, 'coop_player.txt'), 'w', encoding='utf-8') as f:
+            f.write('%d %d %s\n' % (team, loadout, 'host' if is_host else 'client'))
+    except OSError as exc:
+        problems.append('could not write coop_player.txt: %s' % exc)
+    if not problems:
+        print('  auth: mode=%s team=%d loadout=%d role=%s (%s)'
+              % (mode, team, loadout, 'host' if is_host else 'client', label))
+    return problems
 
 
 def find_proxy():
     """The built `version.dll` stand-in, or None."""
+    return _find_release('coop_proxy.dll')
+
+
+def _find_release(name):
+    """A build output by name, honouring `CARGO_TARGET_DIR`.
+
+    Not a hardcoded `coop-rs/target/release`: this project builds into `CARGO_TARGET_DIR` to dodge a Defender lock
+    on the in-tree target, so looking only at the in-tree path finds a stale binary or nothing - and a deploy that
+    silently installs a stale agent is worse than one that refuses.
+    """
     target = os.environ.get('CARGO_TARGET_DIR', r'E:\TEMP\coop-target')
-    for p in (os.path.join(target, 'release', 'coop_proxy.dll'),
+    for p in (os.path.join(target, 'release', name),
               os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
-                           'coop-rs', 'target', 'release', 'coop_proxy.dll')):
+                           'coop-rs', 'target', 'release', name)):
         if os.path.isfile(p):
             return p
     return None
 
 
-def deploy(game_root: str, label: str = 'host') -> bool:
+def deploy(game_root: str, label: str = 'host', mode: str = 'shared-team',
+           team: int = 1, loadout: int = 0, is_host: bool = True) -> bool:
     target = installed_path(game_root)
 
     # Say it out loud when mods have been switched off, instead of quietly creating `~mods` again. A player
@@ -391,6 +466,11 @@ def deploy(game_root: str, label: str = 'host') -> bool:
         print('  FAIL %s' % problem)
         return False
 
+    # Last, the mode rules - so `coop-auth` comes into force only once the session is deployable at all.
+    for problem in install_coop_auth_files(game_root, mode, team, loadout, is_host, label):
+        print('  FAIL %s' % problem)
+        return False
+
     return True
 
 
@@ -402,6 +482,13 @@ def main() -> int:
     ap.add_argument('--check', action='store_true', help='only compare the installed pak with source')
     ap.add_argument('--no-deploy', action='store_true')
     ap.add_argument('--host-only', action='store_true', help='do not touch the second machine')
+    # Which rules `coop-auth` enforces. Explicit because the two players differ, and because a guessed default is
+    # how a team rule becomes a suggestion: `shared-team` is the only mode the UI honestly offers today.
+    ap.add_argument('--mode', default='shared-team', choices=['shared-team', 'versus'],
+                    help='co-op mode for coop_mode.txt (default: shared-team)')
+    ap.add_argument('--team', type=int, default=1, help='this machine (host) EF1Team id 1-10')
+    ap.add_argument('--client-team', type=int, default=2, help='the other machine EF1Team id 1-10')
+    ap.add_argument('--loadout', type=int, default=0, help='car index this player drives, 0 or 1')
     args = ap.parse_args()
 
     client_root = '' if args.host_only or not args.client_share else client_game_root(args.client_share)
@@ -498,7 +585,17 @@ def main() -> int:
             print('  ! second machine not reachable at %s, not deployed there' % client_root)
     failed = False
     for label, root in targets:
-        if not deploy(root, label):
+        # The two machines are different players, so the auth files differ: same mode, different team and role.
+        # Passing the host's identity to the client would make both claim to be the host, and `coop-auth` would
+        # then allow or refuse the wrong writes on one of them.
+        if label == 'client':
+            team = args.client_team
+            is_host = False
+        else:
+            team = args.team
+            is_host = True
+        if not deploy(root, label, mode=args.mode, team=team,
+                      loadout=args.loadout, is_host=is_host):
             failed = True
     if failed:
         return 1

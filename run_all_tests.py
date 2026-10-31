@@ -193,6 +193,19 @@ if shutil.which("node"):
     suite("sqlite", [sys.executable, "-I", os.path.join(TOOLS, "verify_sqlite.py")],
           HERE, lambda out: ("OK: the recorded sqlite3_exec address is right" in out)
           or out.strip().startswith("SKIP"))
+
+    # Is an install complete? The failure mode is never "the deploy failed" - it is "the deploy installed almost
+    # everything", and each missing piece is silent in a different way (version.dll absent = agent never loads;
+    # coop_proxy.enable absent = forwarder inert by design; auth files absent = every team rule passes). This was
+    # written after a scratch deploy put version.dll in place with no agent beside it.
+    #
+    # The suite asserts the *audit works*, not that the mod is installed: on a clean clone there is nothing
+    # deployed and that is the correct, expected state, so reporting "not ready" with named reasons is a pass.
+    # What must not happen is the audit crashing, or answering without naming what is missing.
+    suite("deploy", [sys.executable, "-I", os.path.join(TOOLS, "deploy_audit.py"), "--host-only",
+                     "--summary-only"],
+          HERE, lambda out: ("READY" in out) or ("problem(s) - not ready" in out and "MISSING" in out)
+          or out.strip().startswith("SKIP"))
     # One player must not be able to take every team. Reported as "player 1 being able to take every team and
     # locking them", caused by comparing a string object key against a number - always unequal, so no claim
     # was ever released. This extracts and runs the real `pickTeam` body, so a copy cannot drift from the source.

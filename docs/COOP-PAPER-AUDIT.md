@@ -1107,6 +1107,58 @@ here because the fix is a design decision, not a patch.
 
 ---
 
+## 26. Deploying is what was missing, not code
+
+A readiness question — "are we ready for a 2p test?" — answered *no*, for a reason none of the audits so far had
+caught. The code was fine. The **install was not buildable from the tools**, because four pieces nothing created.
+
+### What a deploy actually needs beside `F1Manager24.exe`
+
+| artefact | if absent |
+|---|---|
+| `version.dll` | the agent is never loaded; nothing reports it |
+| `coop_agent.dll` | `version.dll` forwards and loads nothing, one line in `coop_proxy.log` |
+| `coop-link.exe` | Host/Join says "coop-link.exe not found beside the agent" |
+| `coop_proxy.enable` | `version.dll` is **inert by design**; menu appears, nothing armed |
+| `coop_hook.enable` | the sim hook stays off; Host says "no hook installed" |
+| `coop_mode.txt` + `coop_player.txt` | `coop-auth` returns `None` and every team rule passes |
+| the pak in `~mods` | the multiplayer menu does not exist |
+
+Checking each one against the tools found that **`coop_proxy.enable` and `coop_hook.enable` were created by
+nothing** - `install_proxy` printed a *note* telling a human to create the first one - and the auth files likewise
+had no writer anywhere in the tree. Both are safe defaults (a proxy that stops the game launching is the worst
+failure this mod can produce, so inert-until-enabled is right), but "safe by default" and "deployed means working"
+are different claims, and the gap between them is a machine that looks installed and has nothing running.
+
+**A scratch-root deploy caught the sharpest one.** Installing `version.dll` into a fake game root and listing what
+arrived showed **no `coop_agent.dll`** - the forwarder loads the agent *by bare name from the exe's directory*, so
+the proxy was in place, the export check green, and the agent simply not there. On a real machine that is a correct
+`version.dll`, a working menu, and no co-op, with the only evidence in a log file nobody opens.
+
+### Fixed
+
+* `deploy_pak.py` now installs `coop_agent.dll` and `coop-link.exe` beside the proxy, writes both enable markers,
+  and writes `coop_mode.txt`/`coop_player.txt` per machine (`--mode`, `--team`, `--client-team`, `--loadout`).
+  Ordered after the export check, so a marker can only exist beside a proxy proven loadable.
+* `remote.py deploy-link` pushes `version.dll` (checked against the **client's** exe), writes the markers and the
+  auth files on both machines, and no longer pushes `coop-inject.exe` or tells anyone to run `attach-client`.
+* New `tools/deploy_audit.py` answers the readiness question directly: names every missing artefact and why it
+  matters, cross-checks that the two machines did not declare the same team or the same loadout, and prints
+  `READY` or `N problem(s) - not ready`. It is a suite.
+
+### Two things this cost, recorded rather than hidden
+
+**My local copies had the client hostname in them; the committed bundle had `<client-pc>`.** Copying files from
+`local/` into the bundle therefore reintroduced a private machine name into two tools - the redaction suite caught
+it, which is exactly what it is for. Re-applied the changes to the clean committed versions instead of copying the
+dirty ones over.
+
+**The redaction suite also exposed that `ok = returncode == 0 and predicate`** in the test runner: the audit exits
+1 when not ready, so its predicate could never pass. Added `--summary-only`, which reports the verdict in the output
+and always exits 0 - the default still exits 1, because for a human "not ready" *is* a failure.
+
+---
+
 ## Summary of what this audit changed
 
 | finding | severity | state |

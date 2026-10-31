@@ -84,6 +84,19 @@ HOST_BIN = os.path.join(HOST_GAME, 'F1Manager24', 'Binaries', 'Win64')
 
 LOCAL_PAK = os.path.join(os.path.dirname(os.path.abspath(__file__)), '..', 'pak', 'CoopBridge_P.pak')
 
+# Which rules `coop-auth` enforces on each machine. Written to `coop_mode.txt` / `coop_player.txt` beside the exe,
+# because nothing else creates them and their absence makes every gate pass - the team rules were documented,
+# implemented and tested, and enforced nothing.
+#
+# `shared-team` is the only mode the UI honestly offers today: Versus advertises "a team each, your own garage"
+# and the career layer that would deliver it is report-only. Override with COOP_MODE=versus to try it anyway.
+COOP_MODE = os.environ.get('COOP_MODE', 'shared-team')
+HOST_TEAM = int(os.environ.get('COOP_HOST_TEAM', '1'))
+CLIENT_TEAM = int(os.environ.get('COOP_CLIENT_TEAM', '2'))
+# Loadout is the car index. In `shared-team` each player owns one, which is the point of the mode, so the client
+# must be told which: leaving both at 0 would have them fight over the same car and `coop-auth` would refuse one.
+CLIENT_LOADOUT = int(os.environ.get('COOP_CLIENT_LOADOUT', '1'))
+
 
 def release_dir():
     """Where the release binaries actually are.
@@ -608,7 +621,21 @@ def cmd_deploy_link():
 
     push('coop-link.exe')
     agent_hash = push('coop_agent.dll')
-    push('coop-inject.exe')
+
+    # The auto-loader, without which none of the above is ever loaded. Pushing the binaries and not the proxy
+    # deployed a client that had everything except the thing that starts it - and it looked installed, because
+    # every file we checked for was present. Verified against the client exe's imports, same as the host.
+    proxy = release_binary('coop_proxy.dll')
+    check = subprocess.run(
+        [sys.executable, os.path.join(os.path.dirname(os.path.abspath(__file__)), 'check_proxy.py'),
+         proxy, '--game-exe', SHARE + GAME_BIN + '\\F1Manager24.exe'],
+        capture_output=True, text=True)
+    if check.returncode != 0:
+        raise SystemExit('proxy check failed against the CLIENT exe, not deployed:\n'
+                         + ((check.stdout or '') + (check.stderr or '')).strip())
+    # Named `version.dll` on arrival: Windows resolves a DLL from the exe's own directory before the system one, so
+    # the filename is what makes it load at all.
+    push(proxy, 'version.dll')
 
     # Record what was actually deployed, on both machines.
     #
@@ -645,9 +672,39 @@ def cmd_deploy_link():
             print('%-16s could not write %s: %s' % ('side', path, exc))
 
     print()
-    print('Now: enable the hook on that machine (create coop_hook.enable next to the exe, or set')
-    print('COOP_AGENT_HOOK=1), then run `python remote.py attach-client`. The agent must be INJECTED')
-    print('into the game process; without it the client stages frames and nothing applies.')
+    print('Both machines now have the pak, version.dll, the agent, the link and the enable markers.')
+    print('Nothing to inject: the agent loads with the game. Launch it normally on both machines.')
+
+    # The enable markers. Same reasoning as `coop_side.txt`, already written here for exactly this reason: the agent
+    # reads these from beside the exe, nothing else creates them, and a missing one is silent. `coop_proxy.enable`
+    # absent means the forwarder loads and never loads the agent; `coop_hook.enable` absent means the hook stays
+    # off and Host reports "no hook installed" with no hint of what to create.
+    for label, bin_dir in (('host', host_bin), ('client', SHARE + GAME_BIN)):
+        for marker, why in (('coop_proxy.enable', 'co-op auto-loader'),
+                            ('coop_hook.enable', 'sim hook')):
+            try:
+                with open(os.path.join(bin_dir, marker), 'w', encoding='utf-8', newline='\n') as f:
+                    f.write('enables the %s; delete to disable\n' % why)
+                print('%-16s %s enabled' % ('marker', marker))
+            except OSError as exc:
+                print('%-16s could not write %s: %s' % ('marker', marker, exc))
+
+    # The mode rules, per machine with that machine's own team and role. `coop-auth` returns None when these are
+    # absent and every gate then passes - safe for single-player, and the reason the team rules enforced nothing.
+    for label, bin_dir, team, role in (
+        ('host', host_bin, HOST_TEAM, 'host'),
+        ('client', SHARE + GAME_BIN, CLIENT_TEAM, 'client'),
+    ):
+        loadout = 0 if role == 'host' else CLIENT_LOADOUT
+        for name, text in (('coop_mode.txt', COOP_MODE + '\n'),
+                           ('coop_player.txt', '%d %d %s\n' % (team, loadout, role))):
+            try:
+                with open(os.path.join(bin_dir, name), 'w', encoding='utf-8', newline='\n') as f:
+                    f.write(text)
+            except OSError as exc:
+                print('%-16s could not write %s: %s' % ('auth', name, exc))
+        print('%-16s %s: mode=%s team=%d loadout=%d role=%s'
+              % ('auth', label, COOP_MODE, team, loadout, role))
 
 
 def cmd_versions():
