@@ -186,6 +186,13 @@ if shutil.which("node"):
     # not happen".
     suite("stmt", [sys.executable, "-I", os.path.join(TOOLS, "stmt_injection_test.py")],
           HERE, lambda out: passed_count(out, 12))
+
+    # Is the recorded sqlite3_exec address still right, and can a statement-capture hook be located at all? The
+    # binary carries no sqlite symbols, so every address comes from a byte signature; this checks the one the mod
+    # resolves at runtime and reports that no separate prepare/bind signature exists (see audit section 22).
+    suite("sqlite", [sys.executable, "-I", os.path.join(TOOLS, "verify_sqlite.py")],
+          HERE, lambda out: ("OK: the recorded sqlite3_exec address is right" in out)
+          or out.strip().startswith("SKIP"))
     # One player must not be able to take every team. Reported as "player 1 being able to take every team and
     # locking them", caused by comparing a string object key against a number - always unequal, so no claim
     # was ever released. This extracts and runs the real `pickTeam` body, so a copy cannot drift from the source.

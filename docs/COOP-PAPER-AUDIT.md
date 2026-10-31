@@ -834,6 +834,35 @@ the engine's SQLite. `CAREER-COOP-PLAN.md` §4.3 assumes a capture on the game's
 native/UFunction work needing the game running. The layer is now reachable, not complete - and the README says so
 rather than implying the career works.
 
+### The producer, and what the binary says about it
+
+Whether a prepare-path capture is even *findable* was checkable from the file, so I checked. `tools/verify_sqlite.py`:
+
+* **The binary contains no `sqlite3_*` strings at all** - it is statically linked and packed - so every address
+  comes from a byte signature, not a name. That is why `livedb::find_exec` searches for the
+  `mov r9d, SQLITE_MISUSE_BKPT` guard and rewinds 0x6C.
+* **That search is correct for this build.** The signature sits at file `0x156C96C`; rewound, the entry is file
+  `0x156C900`, which is **RVA `0x156D300`** and its prologue is exactly the `4C 89 4C 24 20` that `find_exec`
+  requires. The documented RVA is right.
+* **There is no separate prepare/bind signature.** The `SQLITE_MISUSE_BKPT` idiom belongs to `sqlite3_exec`
+  alone; the only other `mov r9d` candidate in the image is an unrelated constant. So a prepare-path capture
+  cannot be located the way the hook target was - it needs a disassembler against the live process.
+
+**But that leaves a real producer path open:** `sqlite3_exec` itself is one address, already proven findable, and
+*every* statement the game runs through it passes through it. Wrapping exec would see a statement after the game
+composed it - coarser than a prepare hook, because it cannot distinguish a career write from a query, and it would
+need the SQL parsed to know the table and key. But it is enough to populate `Msg::Stmt`, using an address the mod
+already resolves today. That makes the producer a **known, bounded piece of work** rather than an unknown one.
+
+### A mistake I made here, and one I did not
+
+While checking the RVA I reported that the documentation was wrong by `0xA00`. It was not: I was comparing a
+**file offset** to an **RVA**. In this binary `.udata` has `rawptr 0x600` and `va 0x1000`, so the two differ by
+`0xA00`, and reading bytes at *offset* `0x156D300` lands mid-instruction in a different function - which is
+exactly what I saw and misread as a bug. The doc was right and I nearly "corrected" a correct address. The tool
+now prints both, and prints the wrong one deliberately, so the next reader meets the trap rather than falling in
+it.
+
 ---
 
 ## 21. The per-snapshot cost: 10 MiB read out of the game to send 2.4 KiB
