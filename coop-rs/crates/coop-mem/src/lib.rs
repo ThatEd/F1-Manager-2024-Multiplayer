@@ -23,6 +23,7 @@ pub mod loopstub;
 pub mod params;
 pub mod statements;
 pub mod retarget;
+pub mod sqlcap;
 pub mod stmtapply;
 
 

@@ -900,12 +900,8 @@ Whether a prepare-path capture is even *findable* was checkable from the file, s
 * **There is no separate prepare/bind signature.** The `SQLITE_MISUSE_BKPT` idiom belongs to `sqlite3_exec`
   alone; the only other `mov r9d` candidate in the image is an unrelated constant. So a prepare-path capture
   cannot be located the way the hook target was - it needs a disassembler against the live process.
-
-**But that leaves a real producer path open:** `sqlite3_exec` itself is one address, already proven findable, and
-*every* statement the game runs through it passes through it. Wrapping exec would see a statement after the game
-composed it - coarser than a prepare hook, because it cannot distinguish a career write from a query, and it would
-need the SQL parsed to know the table and key. But it is enough to populate `Msg::Stmt`, using an address the mod
-already resolves today. That makes the producer a **known, bounded piece of work** rather than an unknown one.
+* **But `sqlite3_exec` is one address, and every statement the game runs passes through it.** That is the
+  producer, and §23 builds it.
 
 ### A mistake I made here, and one I did not
 
@@ -915,6 +911,108 @@ While checking the RVA I reported that the documentation was wrong by `0xA00`. I
 exactly what I saw and misread as a bug. The doc was right and I nearly "corrected" a correct address. The tool
 now prints both, and prints the wrong one deliberately, so the next reader meets the trap rather than falling in
 it.
+
+---
+
+## 23. The SQL capture hook — the producer, built and wired
+
+This is the missing half of §20/§22: the thing that notices the game wrote a career row and knows which row.
+
+### How
+
+`sqlite3_exec(db, sql, cb, arg, errmsg)` is a free function, so the statement is in the **second** argument -
+**RDX**, not RCX. Capturing RCX would store the *database handle* and hand it to a string reader inside the game:
+an access violation caused by a read-only observer. The capture instruction is `mov [rip+disp32], rdx`
+(`48 89 15 <disp32>`) = seven bytes, identical to the proven RCX form except for one ModRM byte, so the whole
+existing stub layout - register saves, `movaps` spills, stack alignment - is reused unchanged.
+
+`hook::build_code_capturing` takes the register as a parameter, and `build_code` still means RCX so the proven
+sim hook is byte-for-byte unchanged (asserted). `hook::install_exec` adds a **second, independent** hook with its
+own block, slot and fire counter, because the two fail independently: the sim hook is proven live, the SQL hook
+is not, and a failure to install one must not disturb the other.
+
+### The parser
+
+`coop-mem::sqlcap` turns captured text into a change: `split_statements` honours quoted semicolons and doubled
+quotes (`'O''Brien; Jr'` is one value), then `classify` recognises single-row `INSERT ... (cols) VALUES (...)` and
+`UPDATE ... SET ... WHERE <col> = <val>` and **refuses everything else**, keeping the text. Refusal is the
+important behaviour:
+
+* a **multi-row insert** cannot be one `Msg::Stmt`, and applying one row of many would diverge the two careers;
+* a **compound predicate** (`AND`/`OR`/`IN`) could match several rows - a multi-row write nobody asked for;
+* a **`?` placeholder** carries no value in the text, so it cannot be replicated from it;
+* a **bare word** is a column reference; replicating it as text `"b"` would write a literal `b`.
+
+A parser that guessed would replicate a wrong row into the other player's career. One that refuses costs a
+feature that does not work yet and leaves evidence in the log.
+
+### Report-only, deliberately
+
+`on_sql` classifies and logs a bounded sample (~40 per category, then counts) and **sends nothing**. Two reasons,
+both honest: the game's SQL shapes have never been observed in a running session, so the first live run should
+*teach* us which tables and keys appear rather than have us guess; and mapping a captured table to a `coop-auth`
+`RowKey` needs a per-table catalogue that does not exist yet, so sending before that would replicate writes the
+player is not entitled to make.
+
+The heartbeat reports `sql capture fired xN … writes=W unsupported=U` next to the sim hook's own counter,
+because "the hook fired 3,000 times and saw no writes" and "the hook never fired" look identical otherwise and
+mean opposite things.
+
+### Tested
+
+135 `coop-agent` tests, including: the RDX form differs from RCX by exactly one byte and nothing else; a null
+argument is reported as "no SQL" rather than crashing; an unreadable pointer (`0x10`) is declined rather than
+dereferenced; an unterminated buffer is refused rather than truncated; and - because this project has already
+shipped a complete-but-uncalled module once - **the wiring itself is asserted**, so a hook that installs without
+registering its sink cannot pass.
+
+**Not yet proven:** that `sqlite3_exec`'s prologue on the installed build is the five bytes this expects. That is
+checked at install time against the live process and refused with a message if it differs - the same protection
+the sim hook has - but the constant itself has only been confirmed against the file.
+
+---
+
+## 24. The other gap: two races do not play out the same
+
+§20 details the career gap. Sweeping the design docs for what is still unimplemented turned up a second one, and it
+is the one that most directly breaks "watch the same race":
+
+**`RNG-DETERMINISM.md` recommends a replay mechanism and nothing implements it.** No `Msg::Incident`, no
+`Msg::Seed`, no incident or fault handling anywhere in the eight crates - checked, not assumed.
+
+That document is careful and its conclusion is *"the viable route is not to change the odds, but to replay the same
+rolls"*, with a concrete format at §5.2:
+
+```
+{ tick, car, kind, payload }   // incident fired, fault chosen, propagation, accuracy offset
+```
+
+and the reasoning is sound: the per-lap incident chance is `0.0` on **22 of the 26** circuits, so the replay log is
+"usually empty" and cheap. It even names the shape as the same **effect-capture** pattern the playbook recommends.
+
+**Why this matters as much as the career gap, and is easy to miss.** The current wire carries `Snapshot` - *where
+the cars are*. It carries nothing about *what happened to them*. So the client is told the host's positions every
+frame and, separately, the client's own sim is still rolling its own dice: its own incidents, its own mechanical
+faults, its own accuracy offsets. The result is a client whose cars are continuously being overwritten with the
+host's positions while the client's simulation independently decides a gearbox failed - and the two never
+reconcile, because nothing carries the decision.
+
+That is not a subtle desync. It is "the other player's race does not contain the incident you just saw", and it is
+the single most user-visible failure mode left on the list.
+
+**Status: unbuilt, and the work is a known shape rather than an unknown one.** It needs (a) a `Msg::Incident`
+carrying the four fields §5.2 lists, (b) a decision on the capture point - the same class of hook as §23, on
+whatever function rolls the incident, which is **not** yet located, and (c) an apply path that forces the recorded
+outcome. (c) is the hard part and depends on (b).
+
+**What I could not settle on paper:** the capture point. `sqlite3_exec` could be found because a distinctive
+signature and a documented RVA existed. For the incident roll there is neither - the RNG site is `unknown` even in
+the RNG document's own terms (§3 says the seed lives in the engine and "nowhere else", which is where the trail
+stops). So unlike §23 this one cannot be finished from the file alone; it needs a disassembler against the live
+process, or §5.2's alternative of forcing outcomes through a path the mod already controls.
+
+**Recommendation:** treat this as the second headline gap, not a footnote to the first. A co-op career whose
+incidents differ between players is not a shared race, however well the cars are replicated.
 
 ---
 
@@ -934,9 +1032,10 @@ it.
 | **the resync path never resynced**: `split_frame` returned an empty frame that `drain(..0)` removed nothing of | medium - a corrupt header poisoned the stream forever; with the length cap it would have become a hot loop | **fixed**: `split_frame` returns `Result`, the reader clears and reports the drop |
 | a live-server test had a fixed 12 s deadline that starved under load | low - but a red result that may be noise trains people to ignore red | **fixed**: 60 s, overridable, fails fast if the server exits, and prints its output |
 | **`coop-link` wrote received saves to a hardcoded `SaveGames`**, while the game keeps one folder per profile | **high on another machine** - the transfer reports success and the save lands where the game never looks | **fixed**: picks the folder whose newest `.sav` is newest; tested on a synthetic layout and against the real one |
-| **the career layer is designed and not built**: nothing on the wire carries management state, so both players edit one DB and only the host's edits survive a save | **critical for the stated goal** - "a full career together" is not achievable as built, and Versus advertises a garage it cannot provide | **partly fixed (§22)**: `Msg::Stmt` carries a typed row change and `stmtapply` applies it as one bounded `UPDATE`, proven against real SQLite. The **producer** (capturing the game's own statements) is still missing and needs the game |
+| **the career layer is designed and not built**: nothing on the wire carries management state, so both players edit one DB and only the host's edits survive a save | **critical for the stated goal** - "a full career together" is not achievable as built, and Versus advertises a garage it cannot provide | **transport, applier and producer now exist (§22, §23)**: `Msg::Stmt` carries a typed row change, `stmtapply` applies it as one bounded `UPDATE` (proven against real SQLite), and a second hook on `sqlite3_exec` captures the game's own statements. It reports rather than replicates, because the row->team mapping does not exist yet |
 | **~200 MiB/s is copied out of the game per snapshot** to build a 2.4 KiB frame (10.07 MiB read at 20 Hz) | medium - works, but the cost model was never checked, and a live test would blame the network | **fixed**: `read_cars_sparse` reads ~83 KiB per snapshot for identical output, behind `--sparse` |
 | `FRAME_GAP` was a 25 ms "rate limiter" that nothing read | low - a name that implies back-pressure that does not exist | **fixed**: removed, with the reason recorded where it lived |
+| **incidents and faults are not replicated at all**: the wire carries car *positions*, so each sim rolls its own dice and the two races contain different events | **critical for "watch the same race"** - the most user-visible failure left | **open** (§24): `RNG-DETERMINISM.md` §5.2 specifies the replay format and nothing implements it. Blocked on locating the roll site, which is `unknown` and needs the live process |
 | `Mailbox::drain` indexed the shared buffer directly on the game thread | low (unreachable today) but the failure mode is the whole process | **fixed**: `get(..)` with a zero-entry fallback |
 | save "opaque / unreadable" was imprecise: container is Unreal's, payload is compressed | low | corrected in this document and in `tools/save_format.py` |
 | `SIMULATE_RVA` still points at the right function in the installed exe | - | **verified statically**: file bytes at the RVA match the live-read prologue exactly (`tools/verify_offsets.py`) |

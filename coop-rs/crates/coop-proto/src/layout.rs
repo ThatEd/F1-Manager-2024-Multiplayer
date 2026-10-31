@@ -19,6 +19,17 @@ pub const GUA_RVA: usize = 0x7821450;
 /// `simulate`, as an RVA from the main module base.
 pub const SIMULATE_RVA: usize = 0x2298080;
 
+/// `sqlite3_exec`, as an RVA from the main module base.
+///
+/// Verified against the installed build by `tools/verify_sqlite.py`: the function's prologue is
+/// `4C 89 4C 24 20` at this RVA, found by the `mov r9d, SQLITE_MISUSE_BKPT` guard and rewound 0x6C. It is
+/// recorded rather than scanned for because the binary is packed and carries **no `sqlite3_*` strings at all**,
+/// so a name lookup is impossible and this constant is the only thing anchoring the search to a known build.
+///
+/// Every career write the game makes passes through this one address, which is what makes it a viable capture
+/// point for `Msg::Stmt` (see `sqlhook`).
+pub const SQLITE_EXEC_RVA: usize = 0x156D300;
+
 pub const OBJECT_SIZE: usize = 0xA132F0;
 
 /// Per-car field offsets.

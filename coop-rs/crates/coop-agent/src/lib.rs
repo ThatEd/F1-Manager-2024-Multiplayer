@@ -13,7 +13,7 @@
 use std::fs::OpenOptions;
 use std::io::Write;
 use std::net::TcpStream;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::OnceLock;
 use std::time::{Duration, Instant};
 
@@ -24,6 +24,7 @@ pub mod lobby_steam;
 pub mod crash;
 pub mod hook;
 pub mod hookmail;
+pub mod sqlhook;
 pub mod presence;
 pub mod presence_steam;
 
@@ -614,6 +615,33 @@ fn drain_inbound(stream: &mut TcpStream, buf: &mut Vec<u8>) -> bool {
         }
     }
     saw_any
+}
+
+/// How many captured statements to log per category before only counting them.
+const SQL_SAMPLE: u32 = 40;
+static SQL_WRITES: AtomicU64 = AtomicU64::new(0);
+static SQL_UNSUPPORTED: AtomicU64 = AtomicU64::new(0);
+
+/// `(writes seen, unsupported statements seen)` for the heartbeat line.
+///
+/// Reported next to the hook's fire count on purpose: "the hook fired 3,000 times and saw no writes" and "the hook
+/// never fired" look identical from the outside otherwise, and they mean opposite things.
+pub fn sql_capture_stats() -> (u64, u64) {
+    (
+        SQL_WRITES.load(Ordering::Relaxed),
+        SQL_UNSUPPORTED.load(Ordering::Relaxed),
+    )
+}
+
+/// The hook callback for `sqlite3_exec`: runs on the game thread, inside SQLite's entry point.
+///
+/// Kept tiny and total for the same reason `on_sim` is: this executes in the middle of the game's own call, so a
+/// panic, an allocation spree or a lock here would stall or kill the sim. It classifies the text with a pure
+/// function and hands anything worth keeping to `on_sql`, which only logs.
+///
+/// The pointer comes from RDX (see `hook::CaptureReg`), so it is the statement string SQLite is about to run.
+extern "system" fn on_sql_cb(sql: *mut std::ffi::c_void) {
+    crate::sqlhook::on_exec(sql as usize);
 }
 
 /// The hook callback: runs on the game thread, inside the sim call.
@@ -1754,6 +1782,26 @@ pub fn run(pid: u32, supervisor: &str) {
                                  fires live at 0x{:X}; mailbox callback registered",
                                 block + hook::FIRES_OFF
                             ));
+
+                            // Career-statement capture, a second and independent hook on sqlite3_exec. Failure
+                            // here must not disturb car replication, so it is a separate attempt that only
+                            // logs: the sim hook above is proven and this one has never run in a game.
+                            //
+                            // What it is for: the game writes every career change through sqlite3_exec, so the
+                            // statement text there is the only place that knows which row a management action
+                            // touched. Without it a client's signings stay in the client's process (audit §20).
+                            match hook::install_exec(base) {
+                                Ok(et) => {
+                                    hook::set_exec_callback(Some(on_sql_cb));
+                                    let eb = hook::exec_block().unwrap_or(0);
+                                    log(&format!(
+                                        "sql capture installed at 0x{et:X}; block 0x{eb:X}; \
+                                         fires live at 0x{:X}",
+                                        eb + hook::FIRES_OFF
+                                    ));
+                                }
+                                Err(e) => log(&format!("sql capture NOT installed: {e}")),
+                            }
                         }
                         Err(e) => {
                             crash::note(&format!("hook NOT installed: {e}"));
@@ -1769,6 +1817,8 @@ pub fn run(pid: u32, supervisor: &str) {
     let mut inbound_buf: Vec<u8> = Vec::new();
     let mut captured_logged = 0usize;
     let mut last_fires = 0u64;
+    let mut last_exec_fires = 0u64;
+    let mut last_exec_fires_reported = 0u64;
     let mut ticks_without_fire = 0u32;
     loop {
         // Before anything that can block or retry: a frozen game is exactly when no supervisor is
@@ -1819,6 +1869,23 @@ pub fn run(pid: u32, supervisor: &str) {
                 log(
                     "hook installed and callback registered, but it has never fired: the patched \
                      function has not been called. Start or enter a race session to make it run.",
+                );
+            }
+
+            // The SQL capture's own liveness, reported the same way and for the same reason. A session where the
+            // career produced no writes and a session where the hook never fired look identical otherwise, and
+            // they mean opposite things - so both the fire count and what was seen in it are printed.
+            let efires = hook::exec_fires();
+            if efires != last_exec_fires {
+                let (w, u) = sql_capture_stats();
+                last_exec_fires = efires;
+                log(&format!("sql capture fired x{} (total {efires}) writes={w} unsupported={u}",
+                    efires - last_exec_fires_reported));
+                last_exec_fires_reported = efires;
+            } else if hook::exec_block().is_some() && efires == 0 && ticks_without_fire == 90 {
+                log(
+                    "sql capture installed but has never fired: the game has not run a statement through \
+                     sqlite3_exec yet. Load a career and make a management change to make it run.",
                 );
             }
         }

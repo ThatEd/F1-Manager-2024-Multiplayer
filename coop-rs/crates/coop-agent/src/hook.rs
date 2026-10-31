@@ -1,4 +1,4 @@
-﻿//! The 5-byte inline hook on the sim entry point: capture `this`, then run our code **on the game
+//! The 5-byte inline hook on the sim entry point: capture `this`, then run our code **on the game
 //! thread**.
 //!
 //! Why this is safe enough to do:
@@ -57,7 +57,7 @@
 //! `fires == 0` means the game died before ever reaching the hook and our patch is not implicated.
 
 use std::ffi::c_void;
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicI64, AtomicUsize, Ordering};
 
 #[link(name = "kernel32")]
 extern "system" {
@@ -251,7 +251,6 @@ pub fn install(base: usize) -> Result<usize, String> {
         }
 
         let code = build_code(block, slot, tramp, target, &original);
-
         std::ptr::copy_nonoverlapping(code.as_ptr(), block as *mut u8, code.len());
         // The padding fill also covers the data words; an unfired hook must read as 0, not as 0xCC, or
         // a caller cannot tell "not fired yet" from "captured garbage". The callback word starts zero
@@ -315,9 +314,163 @@ pub fn install(base: usize) -> Result<usize, String> {
     }
 }
 
+/// Installs a second, independent hook on `sqlite3_exec` so career writes can be captured.
+///
+/// Same machinery as [`install_target`], different target, different captured register. Kept separate because the
+/// two hooks fail independently: the sim hook is proven against a live game and the SQL hook is not, so a failure
+/// to install this one must not affect car replication.
+///
+/// Returns the target address, or an error explaining which check refused. Every refusal is a state the game
+/// should survive untouched - nothing is patched unless all of them pass.
+pub fn install_exec(base: usize) -> Result<usize, String> {
+    let existing = EXEC_TARGET.load(Ordering::SeqCst);
+    if existing != 0 {
+        return Ok(existing);
+    }
+    let target = base + coop_proto::layout::SQLITE_EXEC_RVA;
+    let head = crate::sim::bytes_at(target, 16).ok_or("sqlite3_exec unreadable")?;
+    if head.len() < PATCH {
+        return Err("could not read the patch window at sqlite3_exec".into());
+    }
+    if head[0] == 0xE9 {
+        return Err(
+            "sqlite3_exec is already patched - an earlier agent build is resident; restart the game".into()
+        );
+    }
+    // Verified from the file by `tools/verify_sqlite.py`: `4C 89 4C 24 20` is
+    // `mov [rsp+0x20], r9`... in fact the store of r9 that opens the function's frame save. What matters here is
+    // only that these five bytes are complete instructions with no RIP-relative operand, which is the same
+    // condition `install` checks for `simulate` - the trampoline copies them verbatim.
+    const EXEC_HEAD: [u8; STOLEN] = [0x4C, 0x89, 0x4C, 0x24, 0x20];
+    if head[..STOLEN] != EXEC_HEAD {
+        return Err(format!(
+            "unexpected sqlite3_exec prologue {} (expected {})",
+            crate::sim::hex(&head[..STOLEN]),
+            crate::sim::hex(&EXEC_HEAD)
+        ));
+    }
+    install_at(target, &head, CaptureReg::Rdx, &EXEC_BLOCK, &EXEC_TARGET)
+}
+
+/// The shared install body for a second hook site.
+///
+/// Deliberately *not* a refactor of [`install`]: that function is proven against a live game and cannot be
+/// re-tested here, so it keeps its own copy of this logic. The cost is duplication of about forty lines; the
+/// benefit is that a hook which currently works is not disturbed by adding one which does not yet.
+///
+/// `block_slot` and `target_slot` are the hook's own statics, so two hooks in one process keep separate slots,
+/// blocks and fire counters. Sharing them would mean the second install overwrote the first one's captured value.
+fn install_at(
+    target: usize,
+    head: &[u8],
+    reg: CaptureReg,
+    block_slot: &AtomicUsize,
+    target_slot: &AtomicUsize,
+) -> Result<usize, String> {
+    unsafe {
+        let block = alloc_near(target, BLOCK_SIZE)?;
+        let slot = block + SLOT_OFF;
+        let tramp = block + TRAMP_OFF;
+        if let Err(e) = layout_reaches(block, target) {
+            VirtualFree(block as *mut c_void, 0, MEM_RELEASE);
+            return Err(e);
+        }
+        let code = build_code_capturing(block, slot, tramp, target, &head[..STOLEN], reg);
+        std::ptr::copy_nonoverlapping(code.as_ptr(), block as *mut u8, code.len());
+        std::ptr::write_bytes((block + SLOT_OFF) as *mut u8, 0, 8);
+        std::ptr::write_bytes((block + FIRES_OFF) as *mut u8, 0, 8);
+        std::ptr::write_bytes((block + CALLBACK_OFF) as *mut u8, 0, 8);
+        FlushInstructionCache(GetCurrentProcess(), block as *const c_void, code.len());
+
+        if target % PATCH != 0 {
+            VirtualFree(block as *mut c_void, 0, MEM_RELEASE);
+            return Err(format!("target 0x{target:X} is not {PATCH}-byte aligned"));
+        }
+        let patch = build_patch(target, block, head);
+        let mut old = 0u32;
+        if VirtualProtect(target as *mut c_void, PATCH, PAGE_EXECUTE_READWRITE, &mut old) == 0 {
+            VirtualFree(block as *mut c_void, 0, MEM_RELEASE);
+            return Err("VirtualProtect(RW) failed".to_string());
+        }
+        let mut value = [0u8; 8];
+        value.copy_from_slice(&patch);
+        let previous = AtomicI64::swap(
+            &*(target as *const AtomicI64),
+            i64::from_le_bytes(value),
+            Ordering::SeqCst,
+        );
+        FlushInstructionCache(GetCurrentProcess(), target as *const c_void, PATCH);
+        let mut back = 0u32;
+        VirtualProtect(target as *mut c_void, PATCH, old, &mut back);
+
+        // The same two-sided proof `install` performs: what we wrote stuck, and what we replaced was what we
+        // validated. A mismatch means something else is patching this site and we must not pretend to own it.
+        let check = crate::sim::bytes_at(target, PATCH).unwrap_or_default();
+        if check != patch {
+            return Err(format!("patch did not stick: read back {}", crate::sim::hex(&check)));
+        }
+        let mut expected_previous = [0u8; 8];
+        expected_previous.copy_from_slice(&head[..PATCH]);
+        if previous.to_le_bytes() != expected_previous {
+            return Err(format!(
+                "the bytes replaced were {} not {}",
+                crate::sim::hex(&previous.to_le_bytes()),
+                crate::sim::hex(&expected_previous)
+            ));
+        }
+
+        block_slot.store(block, Ordering::SeqCst);
+        target_slot.store(target, Ordering::SeqCst);
+        Ok(target)
+    }
+}
+
+/// The `sqlite3_exec` hook's own block and target, kept apart from the sim hook's.
+static EXEC_BLOCK: AtomicUsize = AtomicUsize::new(0);
+static EXEC_TARGET: AtomicUsize = AtomicUsize::new(0);
+
+/// The block address of the SQL hook, or None if it was never installed.
+pub fn exec_block() -> Option<usize> {
+    let b = EXEC_BLOCK.load(Ordering::SeqCst);
+    if b == 0 {
+        None
+    } else {
+        Some(b)
+    }
+}
+
+/// The SQL pointer captured by the most recent `sqlite3_exec` call, or 0 if it has not fired.
+pub fn exec_captured() -> usize {
+    let b = EXEC_BLOCK.load(Ordering::SeqCst);
+    if b == 0 {
+        return 0;
+    }
+    unsafe { std::ptr::read_volatile((b + SLOT_OFF) as *const usize) }
+}
+
+/// How many times the SQL hook has fired.
+pub fn exec_fires() -> u64 {
+    let b = EXEC_BLOCK.load(Ordering::SeqCst);
+    if b == 0 {
+        return 0;
+    }
+    unsafe { std::ptr::read_volatile((b + FIRES_OFF) as *const u64) }
+}
+
+/// Registers the callback for the SQL hook. Zero clears it.
+pub fn set_exec_callback(cb: Option<Callback>) {
+    let b = EXEC_BLOCK.load(Ordering::SeqCst);
+    if b == 0 {
+        return;
+    }
+    let addr = cb.map(|f| f as usize).unwrap_or(0);
+    unsafe {
+        std::ptr::write_volatile((b + CALLBACK_OFF) as *mut u64, addr as u64);
+    }
+}
+
 /// The RaceSimManager pointer captured by the hook, or 0 if it has not fired yet.
-pub fn captured() -> usize {
-    let block = BLOCK.load(Ordering::SeqCst);
+pub fn captured() -> usize {    let block = BLOCK.load(Ordering::SeqCst);
     if block == 0 {
         return 0;
     }
@@ -405,12 +558,46 @@ pub fn build_code(
     target: usize,
     stolen: &[u8],
 ) -> Vec<u8> {
+    build_code_capturing(block, slot, tramp, target, stolen, CaptureReg::Rcx)
+}
+
+/// Which register the stub copies into the slot before calling the callback.
+///
+/// `simulate` is a member function, so its `this` is in RCX. `sqlite3_exec(db, sql, ...)` is a free function, so
+/// the argument we want is the second one - RDX. Both capture instructions are seven bytes
+/// (`48 89 0D`/`48 89 15 <disp32>`), so the stub layout, every displacement below, and every test that pins the
+/// offsets are identical whichever is chosen. Getting the register wrong would pass a database handle to a string
+/// reader, so the choice is named rather than positional.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CaptureReg {
+    Rcx,
+    Rdx,
+}
+
+impl CaptureReg {
+    /// The `mov [rip+disp32], reg` bytes for this register.
+    fn store(self) -> [u8; 3] {
+        match self {
+            CaptureReg::Rcx => [0x48, 0x89, 0x0D],
+            CaptureReg::Rdx => [0x48, 0x89, 0x15],
+        }
+    }
+}
+
+/// `build_code` with an explicit capture register, so a second hook site can reuse the whole stub.
+pub fn build_code_capturing(
+    block: usize,
+    slot: usize,
+    tramp: usize,
+    target: usize,
+    stolen: &[u8],
+    reg: CaptureReg,
+) -> Vec<u8> {
+    let _ = (tramp, target, stolen);
     let mut code: Vec<u8> = Vec::with_capacity(TRAMP_OFF + 32);
 
-    // mov [rip+disp32], rcx  - capture `this` (block+0x00, 7 bytes)
-    code.push(0x48);
-    code.push(0x89);
-    code.push(0x0D);
+    // mov [rip+disp32], <captured reg>  - capture the argument (block+0x00, 7 bytes)
+    code.extend_from_slice(&reg.store());
     code.extend_from_slice(&rel32(block + 0x07, slot));
 
     // inc qword [rip+disp32] - fire counter (block+0x07, 7 bytes)
@@ -857,9 +1044,51 @@ mod tests {
     /// back an address around 0x1EC_82590000 while the module sits at 0x140000000 - about 2 TB away.
     /// The displacement then truncates, the jump lands in unmapped memory, and the fault looks like a
     /// collapsed stack rather than a bad encoding.
+    /// The SQL hook must capture RDX, not RCX.
+    ///
+    /// `sqlite3_exec(db, sql, ...)` puts the statement in the second argument. Capturing RCX instead would store the
+    /// database handle and hand it to a string reader inside the game - an access violation caused by a read-only
+    /// observer. The two encodings differ by exactly one ModRM byte, so this pins both and asserts the rest of the
+    /// stub is unchanged between them (which is what lets the existing offset tests still apply).
     #[test]
-    fn a_distant_block_is_rejected_before_it_is_patched() {
-        let target = 0x1_4000_0000 + 0x0229_8080; // module + simulate RVA
+    fn the_sql_hook_captures_rdx_not_rcx() {
+        let block = 0x1000_0000usize;
+        let slot = block + SLOT_OFF;
+        let tramp = block + TRAMP_OFF;
+        let target = block + 0x100;
+        let stolen = [0x4Cu8, 0x89, 0x4C, 0x24, 0x20];
+
+        let rcx = build_code_capturing(block, slot, tramp, target, &stolen, CaptureReg::Rcx);
+        let rdx = build_code_capturing(block, slot, tramp, target, &stolen, CaptureReg::Rdx);
+
+        assert_eq!(&rcx[..3], &[0x48, 0x89, 0x0D], "RCX form is mov [rip+d], rcx");
+        assert_eq!(&rdx[..3], &[0x48, 0x89, 0x15], "RDX form is mov [rip+d], rdx");
+        // Only the ModRM byte differs, so every displacement and every pinned offset below it is untouched.
+        assert_eq!(rcx[2], 0x0D);
+        assert_eq!(rdx[2], 0x15);
+        assert_eq!(&rcx[3..], &rdx[3..], "the rest of the stub must be identical");
+        assert_eq!(rcx.len(), rdx.len());
+        assert_eq!(&rcx[3..7], &rel32(block + 0x07, slot));
+    }
+
+    /// The default `build_code` must still mean RCX, so the proven sim hook is unchanged by this refactor.
+    #[test]
+    fn build_code_still_captures_rcx() {
+        let block = 0x1000_0000usize;
+        let a = build_code(block, block + SLOT_OFF, block + TRAMP_OFF, block + 0x100, &[0x40, 0x53, 0x56, 0x41, 0x55]);
+        let b = build_code_capturing(
+            block,
+            block + SLOT_OFF,
+            block + TRAMP_OFF,
+            block + 0x100,
+            &[0x40, 0x53, 0x56, 0x41, 0x55],
+            CaptureReg::Rcx,
+        );
+        assert_eq!(a, b);
+    }
+
+    #[test]
+    fn a_distant_block_is_rejected_before_it_is_patched() {        let target = 0x1_4000_0000 + 0x0229_8080; // module + simulate RVA
         // The addresses actually observed from VirtualAlloc(NULL) on this machine.
         let distant = 0x1_EC82_590000usize;
 
