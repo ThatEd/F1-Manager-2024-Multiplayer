@@ -480,6 +480,14 @@
             agent("host", "POST")
                 .then(function (st) {
                     self.setState({ armed: !!st.armed });
+                    // A publisher that could not start means the hook is armed and nothing will ever send car
+                    // frames - which looks exactly like a broken mod. Report it as its own failure rather than
+                    // hiding it behind "Hosting".
+                    var pub = st.publisher || {};
+                    if (pub.error) {
+                        self.setStatus("hosting, but the frame publisher did not start: " + pub.error, true);
+                        return;
+                    }
                     self.setStatus(
                         st.armed
                             ? "Hosting. Start or load a save, then advance to the race when both players are on the grid."
@@ -517,6 +525,16 @@
             agent("join", "POST")
                 .then(function (st) {
                     self.setState({ armed: !!st.armed });
+                    // The host's save arriving is the one fact that changes what the client should do next, and it
+                    // used to be invisible: the file was transferred and hash-verified, and the UI said nothing, so
+                    // the player had no reason to think their career was out of date. Say it, and say the action.
+                    if (st.session_save) {
+                        self.setStatus(
+                            "The host's save arrived: " + st.session_save +
+                                ". Load it before advancing, or you will play the old career."
+                        );
+                        return;
+                    }
                     self.setStatus(
                         st.armed
                             ? "Joined. Waiting for the host's frames (" + (st.frames_applied || 0) + " applied so far)."

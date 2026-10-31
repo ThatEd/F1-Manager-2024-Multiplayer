@@ -208,9 +208,65 @@ mod tests {
         assert_eq!(s.as_deref(), Some("hello"));
     }
 
+    /// The client must be told when the host's save lands, in the status the menu actually reads.
+    ///
+    /// The transfer itself was already correct and silently useless: the file arrived, its hash verified, and
+    /// nothing changed in the UI - so the player kept playing the old career with no indication. This asserts the
+    /// name reaches `lobby_join_body` (the body the Join button reads) rather than only a console line.
     #[test]
-    fn the_sink_can_be_cleared_and_reinstalled() {
-        set_sink(Some(|_| {}));
+    fn the_join_body_reports_a_received_save() {
+        let src = include_str!("lib.rs");
+        let at = src.find("fn lobby_join_body").expect("join body present");
+        let body = &src[at..(at + 2000).min(src.len())];
+        assert!(
+            body.contains("session_save"),
+            "the Join response must carry the received save's name, or the menu cannot tell the player"
+        );
+        assert!(
+            body.contains("received_session()"),
+            "and it must come from the recorded file, not be a placeholder"
+        );
+        // The reader and the writer have to agree on the location, which is beside the executable.
+        let reader = src.find("fn received_session").expect("reader present");
+        let reader_body = &src[reader..(src.len()).min(reader + 700)];
+        assert!(
+            reader_body.contains("log_path()"),
+            "the reader must look beside the agent's own log, not in a guessed directory"
+        );
+    }
+
+    /// The host tab must start the frame publisher itself.
+    ///
+    /// This is the defect the owner named twice - "we do not want the server to be a separate launch". The
+    /// in-process relay solved it for the supervisor, and the same problem was left unsolved for `coop-link`,
+    /// which is the process that actually reads the sim. A hook armed with nothing publishing is
+    /// indistinguishable from a broken mod, and nothing in the log says which it is.
+    #[test]
+    fn the_host_path_starts_the_frame_publisher() {
+        let src = include_str!("lib.rs");
+        let at = src.find("fn lobby_host_body").expect("host body present");
+        let body = &src[at..(at + 1200).min(src.len())];
+        assert!(
+            body.contains("ensure_publisher"),
+            "becoming the host must start coop-link, or the player has to launch it by hand"
+        );
+        let pf = src.find("fn ensure_publisher").expect("ensure_publisher present");
+        let pbody = &src[pf..(src.len()).min(pf + 3000)];
+        assert!(pbody.contains("coop-link.exe"), "it must look for the real binary");
+        assert!(
+            pbody.contains("PUBLISHER_STARTED"),
+            "and be guarded, so repeated menu visits do not spawn a process each time"
+        );
+        // Only the host publishes; a client machine may not even ship the binary.
+        assert!(pbody.contains("is_host"), "the client must not start a publisher");
+        assert!(
+            pbody.contains("not found"),
+            "a missing binary must be reported by name rather than silently ignored"
+        );
+    }
+
+    #[test]
+    fn the_sink_can_be_cleared_and_reinstalled() {        set_sink(Some(|_| {}));
         assert!(sink().is_some());
         set_sink(None);
         assert!(sink().is_none(), "a cleared sink must not be called");

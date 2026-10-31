@@ -1612,9 +1612,16 @@ fn lobby_host_body() -> String {
     let block = hook::block();
     let (fires, cb) = hook::state();
     let rc = latest_rc();
+    // Start the publisher as part of "become the host". This is the step that keeps the mod from needing a second
+    // thing launched and forgotten - the same problem the in-process relay solved for the supervisor, left
+    // unsolved for `coop-link`, which is the process that actually reads the sim and sends car frames. Without it
+    // the host arms the hook, the loopback relay is up, and nothing ever publishes, which looks exactly like a
+    // broken mod.
+    let publisher = ensure_publisher(agent_side() == coop_proto::Side::Host);
     format!(
         "{{\"role\":\"host\",\"armed\":{},\"hook_installed\":{},\"callback_registered\":{},\
-          \"hook_fires\":{},\"rc_flags\":{},\"rc_state\":{},\"rf_state\":{},\"write_port\":{}}}",
+          \"hook_fires\":{},\"rc_flags\":{},\"rc_state\":{},\"rf_state\":{},\"write_port\":{},\
+          \"publisher\":{}}}",
         block.is_some() && cb != 0,
         block.is_some(),
         cb != 0,
@@ -1622,19 +1629,92 @@ fn lobby_host_body() -> String {
         rc.flags,
         rc.rc_state,
         rc.rf_state,
-        write_port()
+        write_port(),
+        publisher
     )
 }
 
+/// Starts `coop-link` in the host role if it is not already running, and reports what happened as a JSON string.
+///
+/// Why here: the menu's "Host" button is the moment the player has declared intent, and the agent is already inside
+/// the game, so it can start the publisher itself. Every alternative - a shortcut, a `.bat`, a line in a readme -
+/// is a second thing to launch and forget, and forgetting it is indistinguishable from a broken mod.
+///
+/// Guarded three ways: only in the host role, only if the binary is actually beside the agent (a client machine
+/// does not need it), and only once per process. A failure is reported rather than raised, because a missing
+/// publisher must not make "Host" itself look like it failed - the sim side is still armed and the player can be
+/// told separately.
+fn ensure_publisher(is_host: bool) -> String {
+    if !is_host {
+        return "{\"started\":false,\"reason\":\"not the host\"}".to_string();
+    }
+    if PUBLISHER_STARTED.swap(true, Ordering::SeqCst) {
+        return "{\"started\":false,\"reason\":\"already started by this process\"}".to_string();
+    }
+    let exe_dir = match std::env::current_exe().ok().and_then(|p| p.parent().map(|d| d.to_path_buf())) {
+        Some(d) => d,
+        None => return "{\"started\":false,\"error\":\"no module directory\"}".to_string(),
+    };
+    let bin = exe_dir.join("coop-link.exe");
+    if !bin.exists() {
+        // The client machine's package may omit it. Say so instead of pretending.
+        return format!(
+            "{{\"started\":false,\"error\":\"coop-link.exe not found beside the agent ({})\"}}",
+            bin.display()
+        );
+    }
+    let port = write_port();
+    let _ = port; // coop-link discovers the write port from the agent's side file; no flag for it.
+    let mut cmd = std::process::Command::new(&bin);
+    // Exactly the flags `coop-link` defines: `--role`, `--supervisor`, `--pid`. Passing a flag it does not
+    // understand would be silently ignored (its parser takes what it knows), so an invented one is worse than none.
+    cmd.arg("--role")
+        .arg("host")
+        .arg("--supervisor")
+        .arg(format!("127.0.0.1:{}", coop_supervisor::DEFAULT_PORT))
+        .arg("--pid")
+        .arg(std::process::id().to_string());
+    // Detached: the publisher outlives this call but not the game, and it must not inherit the game's console.
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+        cmd.creation_flags(CREATE_NO_WINDOW);
+    }
+    match cmd.spawn() {
+        Ok(child) => {
+            log(&format!("started the frame publisher (pid {}) from {}", child.id(), bin.display()));
+            format!("{{\"started\":true,\"pid\":{}}}", child.id())
+        }
+        Err(e) => {
+            PUBLISHER_STARTED.store(false, Ordering::SeqCst);
+            log(&format!("could not start the frame publisher: {e}"));
+            format!("{{\"started\":false,\"error\":\"{e}\"}}")
+        }
+    }
+}
+
+/// Set once the publisher has been launched, so repeated menu visits do not spawn a process each time.
+static PUBLISHER_STARTED: AtomicBool = AtomicBool::new(false);
+
 /// JSON for `POST /coop/join`: a client's view, which is what the second player needs before a race.
+///
+/// Includes `session_save`: the name of a save the host has sent and whose hash verified, or `null`. This is the
+/// one fact that turns "the transfer worked" into something a human can act on. Before it was reported, the client
+/// received a fully verified save into its SaveGames folder and the UI said nothing - so the correct next step
+/// (load it) was invisible, and the session looked broken with no error anywhere.
 fn lobby_join_body() -> String {
     let block = hook::block();
     let (fires, cb) = hook::state();
     let mode = tyre_mode();
+    let session = match received_session() {
+        Some(name) => format!("\"{}\"", name.replace('\\', "\\\\").replace('"', "\\\"")),
+        None => "null".to_string(),
+    };
     format!(
         "{{\"role\":\"client\",\"armed\":{},\"hook_installed\":{},\"callback_registered\":{},\
           \"hook_fires\":{},\"frames_applied\":{},\"entries_written\":{},\"tyre_mode\":\"{}\",\
-          \"write_port\":{}}}",
+          \"write_port\":{},\"session_save\":{}}}",
         block.is_some() && cb != 0,
         block.is_some(),
         cb != 0,
@@ -1642,8 +1722,28 @@ fn lobby_join_body() -> String {
         mailbox().stats().0,
         mailbox().stats().2,
         mode.as_str(),
-        write_port()
+        write_port(),
+        session
     )
+}
+
+/// The name of the last save the host sent and this machine verified, or `None`.
+///
+/// `coop-link` writes the file into the save folder and prints "session saved to ...", but that print goes to a
+/// console nobody is watching during a game. Recording it here is what lets the menu say "the host's save arrived:
+/// load it" instead of leaving the player to guess why their career looks like the old one.
+///
+/// A small side file rather than shared state: the writer is a separate process (`coop-link`), so the agent
+/// cannot be told in memory. Absent or unreadable means "nothing received", which is the safe reading.
+fn received_session() -> Option<String> {
+    let path = log_path().with_file_name("coop_session_received.txt");
+    let text = std::fs::read_to_string(path).ok()?;
+    let name = text.trim();
+    if name.is_empty() {
+        None
+    } else {
+        Some(name.to_string())
+    }
 }
 
 /// HTTP port for the lobby endpoint.

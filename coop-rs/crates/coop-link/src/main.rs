@@ -1296,6 +1296,11 @@ fn handle_session(state: &mut SessionReceiver, msg: Msg) -> Option<String> {
             match std::fs::write(&path, &state.buf) {
                 Ok(()) => {
                     state.written = true;
+                    // Record the name where the in-process agent can read it, so the menu can tell the player a
+                    // save arrived. Without this the transfer succeeds silently from the UI's point of view: the
+                    // file is verified and written, the console line scrolls past, and the client has no idea the
+                    // next step is to load it.
+                    note_received_session(&name);
                     Some(format!(
                         "session saved to {} ({} bytes, hash verified)",
                         path.display(),
@@ -1307,6 +1312,22 @@ fn handle_session(state: &mut SessionReceiver, msg: Msg) -> Option<String> {
         }
         _ => None,
     }
+}
+
+/// Leaves the received save's name next to the agent's log, where `lobby_join_body` reports it.
+///
+/// **Must match `coop_agent::log_path`**, which is `coop_agent.log` beside the *executable* - not under
+/// `Saved\Logs`. Writing to the wrong directory would fail silently and the menu would never announce the save,
+/// which is exactly the "looks like nothing happened" failure this exists to remove. Verified by reading
+/// `log_path` rather than assuming a conventional UE log location.
+///
+/// Best effort: a failure here must not turn a successfully transferred save into a reported error.
+fn note_received_session(name: &str) {
+    let dir = match std::env::current_exe().ok().and_then(|p| p.parent().map(|d| d.to_path_buf())) {
+        Some(d) => d,
+        None => return,
+    };
+    let _ = std::fs::write(dir.join("coop_session_received.txt"), name);
 }
 
 /// Where a received session is written: the game's own SaveGames folder.

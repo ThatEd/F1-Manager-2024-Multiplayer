@@ -1039,6 +1039,61 @@ incidents differ between players is not a shared race, however well the cars are
 
 ---
 
+## 25. Two gaps a second sweep found — both "the player cannot tell"
+
+Auditing *features the UI offers* against *what the code does*, rather than auditing encoders, found two things.
+
+### 25.1 The frame publisher was still a separate launch
+
+`lobby.js`'s Host handler says, in its own comment:
+
+> Hosting used to need `coop-supervisor.exe` running alongside the game - a second thing to launch and forget, and
+> forgetting it looks exactly like a broken mod.
+
+That was fixed for the **supervisor**, which now runs as a thread inside the agent. It was **not** fixed for
+`coop-link`, which is the process that actually reads the sim and sends car frames: `Command::new` spawning
+`coop-link` appears **zero** times in the whole workspace. So the host armed the hook, the loopback relay came up,
+and nothing ever published - the exact symptom the comment describes, just moved one process along. This is the
+owner's complaint ("we do not want the server to be a separate launch") restated in code.
+
+Fixed: `POST /coop/host` now calls `ensure_publisher`, which launches `coop-link.exe --role host` from beside the
+agent. Guarded three ways - host role only (a client machine may not ship the binary), once per process, and only
+if the file exists - and every failure is reported as its own JSON field rather than folded into "Hosting", because
+a publisher that did not start and a hook that is not armed need different fixes and looked identical before.
+
+### 25.2 The host's save arrived and nobody was told
+
+The transfer was already correct and **silently useless**. On `SessionReady` the hash is verified, the file is
+written into the live `SaveGames` folder (§19), and `coop-link` prints `session saved to …` to a console nobody is
+watching during a game. Nothing told the UI. So the client received a valid save, kept playing their own older
+career, and the session looked broken with no error anywhere - a failure mode that costs a whole test session and
+teaches nothing.
+
+Fixed end to end: `coop-link` records the name in `coop_session_received.txt` beside the **agent's log**, the agent
+reports it as `session_save` in the Join response, and the menu says *"The host's save arrived: \<name\>. Load it
+before advancing, or you will play the old career."*
+
+**A near-miss worth recording:** my first version wrote that file under `%LOCALAPPDATA%\F1Manager24\Saved\Logs`,
+which is where a UE game conventionally logs. The agent's `log_path()` is `coop_agent.log` **beside the
+executable**. I only caught it by reading `log_path` instead of trusting the convention - had I not, the record
+would have been written and never read, and the feature would fail silently in exactly the way it exists to
+prevent. The reader is now asserted to use `log_path()` so the two cannot drift apart.
+
+### 25.3 A third, recorded not fixed: custom teams
+
+`EF1Team.CustomTeam = 32` - a single shared slot, deliberately outside 1–10 (`GameTypes.js:58`). The mod's team
+machinery assumes 1–10 throughout: `coop-auth`'s doc comment says "`EF1Team` value, 1..=10", and the picker's
+`TEAM_IDS` is literally `[1..10]`, so a custom team **cannot be selected or claimed**.
+
+The consequence is narrow but real: a player who creates a custom team has `Player.TeamID = 32`, the shared slot.
+In single-player that is fine. In Versus, two players cannot each have a custom team - the game has one slot, not
+two - and the picker offers them no way to say so. `coop-auth` would still permit writes to team 32 (it compares
+`t == player.team`), so this is not unsafe, just unsupported and unexplained. **Recorded as a known limitation:**
+the UI should say that custom teams are single-player-only until there is a design for sharing one slot. Not fixed
+here because the fix is a design decision, not a patch.
+
+---
+
 ## Summary of what this audit changed
 
 | finding | severity | state |
@@ -1059,6 +1114,9 @@ incidents differ between players is not a shared race, however well the cars are
 | **~200 MiB/s is copied out of the game per snapshot** to build a 2.4 KiB frame (10.07 MiB read at 20 Hz) | medium - works, but the cost model was never checked, and a live test would blame the network | **fixed**: `read_cars_sparse` reads ~83 KiB per snapshot for identical output, behind `--sparse` |
 | `FRAME_GAP` was a 25 ms "rate limiter" that nothing read | low - a name that implies back-pressure that does not exist | **fixed**: removed, with the reason recorded where it lived |
 | **incidents and faults are not replicated at all**: the wire carries car *positions*, so each sim rolls its own dice and the two races contain different events | **critical for "watch the same race"** - the most user-visible failure left | **open** (§24): `RNG-DETERMINISM.md` §5.2 specifies the replay format and nothing implements it. Blocked on locating the roll site, which is `unknown` and needs the live process |
+| **the frame publisher was still a separate launch**: `coop-link` is spawned by nothing, so the host armed the hook and nothing published | **high** - the exact symptom ("looks like a broken mod") the in-process relay was built to remove, one process along | **fixed** (§25.1): `POST /coop/host` starts `coop-link.exe`, with the failure reported as its own field |
+| **a received save arrived and the UI never said so** | **high** - a whole test session lost with no error anywhere; the client kept playing the old career | **fixed** (§25.2): recorded beside the agent log, reported as `session_save`, and the menu says to load it |
+| custom teams (`EF1Team.CustomTeam = 32`) cannot be selected or claimed; the picker is `[1..10]` | low - unsupported and unexplained, not unsafe | **open** (§25.3): a design decision (one shared slot), so the UI should say custom teams are single-player-only |
 | `Mailbox::drain` indexed the shared buffer directly on the game thread | low (unreachable today) but the failure mode is the whole process | **fixed**: `get(..)` with a zero-entry fallback |
 | save "opaque / unreadable" was imprecise: container is Unreal's, payload is compressed | low | corrected in this document and in `tools/save_format.py` |
 | `SIMULATE_RVA` still points at the right function in the installed exe | - | **verified statically**: file bytes at the RVA match the live-read prologue exactly (`tools/verify_offsets.py`) |
