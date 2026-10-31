@@ -65,9 +65,9 @@ python -I run_all_tests.py redaction   # no private identifiers in the tree
 ```
 
 Currently: **310 Rust tests** (254 across the workspace plus 56 in `coop-mem --lib`, whose separate integration
-binary has a pre-existing crash), plus 23 suites (`rust`, `auth`, `unit`, `press`, `observe`, `steam`,
+binary has a pre-existing crash), plus 24 suites (`rust`, `auth`, `unit`, `press`, `observe`, `steam`,
 `inert`, `drive`, `render`, `boot`, `pak`, `proxy`, `offsets`, `gaps`, `surface`, `stmt`, `sqlite`, `deploy`,
-`teams`, `clock`, `guard`, `e2e`, `redaction`) and the redaction check that fails if a private path has leaked into the tree.
+`deploypush`, `teams`, `clock`, `guard`, `e2e`, `redaction`) and the redaction check that fails if a private path has leaked into the tree.
 All of it passes from a clean clone. The runner prints each suite's own assertion count rather than one
 grand total, because two suites report `N/M passed` and two report `N passed`, and summing them across
 both spellings double-counts.

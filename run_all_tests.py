@@ -206,6 +206,14 @@ if shutil.which("node"):
                      "--summary-only"],
           HERE, lambda out: ("READY" in out) or ("problem(s) - not ready" in out and "MISSING" in out)
           or out.strip().startswith("SKIP"))
+
+    # Does the client deploy push everything the client needs? Each omission is silent in a different place, and
+    # two of them were found only by running the deploy against a scratch install: version.dll (without it the
+    # agent never loads) and the pak (without it there is no multiplayer menu, so every DLL is present and the
+    # player has no way in). Asserted against the source, because the alternative is deploying to a real machine
+    # to find out.
+    suite("deploypush", [sys.executable, "-I", os.path.join(TOOLS, "deploy_push_test.py")],
+          HERE, lambda out: passed_count(out, 8))
     # One player must not be able to take every team. Reported as "player 1 being able to take every team and
     # locking them", caused by comparing a string object key against a number - always unequal, so no claim
     # was ever released. This extracts and runs the real `pickTeam` body, so a copy cannot drift from the source.

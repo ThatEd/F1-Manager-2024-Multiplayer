@@ -1112,6 +1112,12 @@ here because the fix is a design decision, not a patch.
 A readiness question — "are we ready for a 2p test?" — answered *no*, for a reason none of the audits so far had
 caught. The code was fine. The **install was not buildable from the tools**, because four pieces nothing created.
 
+**Verified the whole path afterwards, not just the pieces.** `deploy_pak.py` and `remote.py deploy-link` were run
+against scratch game roots on both sides and audited. That found one more: **`deploy-link` never pushed the pak**,
+so the client had every DLL, an HTTP endpoint, and no multiplayer menu - the UI is what exposes the mod, and it was
+missing. Fixed and re-verified: both scratch machines report `READY` with the pak present, and the auth files differ
+correctly (host `1 0 host`, client `2 1 client`, so they are not fighting over one team or one car).
+
 ### What a deploy actually needs beside `F1Manager24.exe`
 
 | artefact | if absent |
@@ -1140,8 +1146,10 @@ the proxy was in place, the export check green, and the agent simply not there. 
 * `deploy_pak.py` now installs `coop_agent.dll` and `coop-link.exe` beside the proxy, writes both enable markers,
   and writes `coop_mode.txt`/`coop_player.txt` per machine (`--mode`, `--team`, `--client-team`, `--loadout`).
   Ordered after the export check, so a marker can only exist beside a proxy proven loadable.
-* `remote.py deploy-link` pushes `version.dll` (checked against the **client's** exe), writes the markers and the
-  auth files on both machines, and no longer pushes `coop-inject.exe` or tells anyone to run `attach-client`.
+* `remote.py deploy-link` pushes `version.dll` (checked against the **client's** exe) **and the pak** - the pak was
+  the last gap: without it the client has every DLL, a working HTTP endpoint, and no multiplayer menu, because the
+  UI is what exposes the mod. It also writes the markers and the auth files on both machines, and no longer pushes
+  `coop-inject.exe` or tells anyone to run `attach-client`.
 * New `tools/deploy_audit.py` answers the readiness question directly: names every missing artefact and why it
   matters, cross-checks that the two machines did not declare the same team or the same loadout, and prints
   `READY` or `N problem(s) - not ready`. It is a suite.

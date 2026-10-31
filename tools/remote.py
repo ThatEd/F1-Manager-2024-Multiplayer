@@ -622,6 +622,28 @@ def cmd_deploy_link():
     push('coop-link.exe')
     agent_hash = push('coop_agent.dll')
 
+    # The pak. Without it the client has no multiplayer menu at all - the DLLs load and expose an HTTP endpoint,
+    # but nothing in the UI calls it, so the player sees the stock front end and no way to join. `deploy_pak.py`
+    # handles the host's pak; this is the client's, and it was simply never pushed.
+    if not os.path.exists(LOCAL_PAK):
+        raise SystemExit('missing %s\n  build it with: python tools/deploy_pak.py --no-deploy' % LOCAL_PAK)
+    pak_dir = SHARE + GAME_BIN.replace('\\Binaries\\Win64', '') + '\\Content\\Paks\\~mods'
+    pak_dst = os.path.join(pak_dir, 'CoopBridge_P.pak')
+    try:
+        os.makedirs(pak_dir, exist_ok=True)
+        shutil.copy2(LOCAL_PAK, pak_dst)
+        import hashlib
+        with open(LOCAL_PAK, 'rb') as f:
+            want_pak = hashlib.sha256(f.read()).hexdigest()
+        with open(pak_dst, 'rb') as f:
+            got_pak = hashlib.sha256(f.read()).hexdigest()
+        if got_pak != want_pak:
+            raise SystemExit('VERIFY FAIL for the pak: the copy does not match the build')
+        print('%-16s remote: %8d bytes  %s  OK' % ('CoopBridge_P.pak', os.path.getsize(pak_dst),
+                                                   got_pak[:16]))
+    except OSError as e:
+        raise SystemExit('could not deploy the client pak to %s: %s' % (pak_dst, e))
+
     # The auto-loader, without which none of the above is ever loaded. Pushing the binaries and not the proxy
     # deployed a client that had everything except the thing that starts it - and it looked installed, because
     # every file we checked for was present. Verified against the client exe's imports, same as the host.
