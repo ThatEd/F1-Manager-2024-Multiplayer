@@ -224,7 +224,7 @@ if shutil.which("node"):
     # player has no way in). Asserted against the source, because the alternative is deploying to a real machine
     # to find out.
     suite("deploypush", [sys.executable, "-I", os.path.join(TOOLS, "deploy_push_test.py")],
-          HERE, lambda out: passed_count(out, 8))
+          HERE, lambda out: passed_count(out, 15))
     # One player must not be able to take every team. Reported as "player 1 being able to take every team and
     # locking them", caused by comparing a string object key against a number - always unequal, so no claim
     # was ever released. This extracts and runs the real `pickTeam` body, so a copy cannot drift from the source.

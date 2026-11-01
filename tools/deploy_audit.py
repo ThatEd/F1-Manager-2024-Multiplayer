@@ -17,8 +17,12 @@ them is silent:
 | `coop_mode.txt` + `coop_player.txt` | `coop-auth` returns None and every team rule passes |
 | the pak in `~mods` | the menu does not exist at all |
 
-This was written after deploying into a scratch game root and listing what arrived: the proxy had been installed
-with **no agent beside it**, which would have produced a machine that looked installed and had nothing running.
+And a second failure mode, for the same reason: **a stale `coop_agent.dll`**. Present-but-old is indistinguishable
+from present-and-current by looking at the file list, and the deploy takes its build from `CARGO_TARGET_DIR`, which
+two working trees can share. That is not hypothetical - this repository has a private tree at `local/` that also
+holds a `coop-rs` and a `tools/deploy_pak.py`, both older, and building from it writes a `coop_agent.dll` containing
+the *previous* replication allowlist over the top of a current one. The audit now warns when the installed DLL is
+older than the sources it was supposedly built from.
 
 Usage
 -----
@@ -34,6 +38,23 @@ import sys
 DEFAULT_GAME = os.environ.get('COOP_GAME', r'E:\Steam\steamapps\common\F1 Manager 2024')
 CLIENT_SHARE = os.environ.get('COOP_CLIENT_SHARE', r'\\<client-pc>\e')
 CLIENT_GAME = os.path.join(CLIENT_SHARE, 'SteamLibrary', 'steamapps', 'common', 'F1 Manager 2024')
+
+HERE = os.path.dirname(os.path.abspath(__file__))
+PROJECT = os.path.dirname(HERE)
+
+
+def newest_agent_source():
+    """Modification time of the newest `.rs` under this project's `coop-rs/crates`."""
+    newest = 0.0
+    crates = os.path.join(PROJECT, 'coop-rs', 'crates')
+    for root, _dirs, files in os.walk(crates):
+        for f in files:
+            if f.endswith('.rs'):
+                try:
+                    newest = max(newest, os.path.getmtime(os.path.join(root, f)))
+                except OSError:
+                    pass
+    return newest
 
 
 def audit(root, label):
@@ -61,6 +82,8 @@ def audit(root, label):
     present, missing = [], []
     for name, path, why in required:
         (present if os.path.isfile(path) else missing).append((name, why, path))
+    # Present but wrong is the other half of the problem, and it is silent.
+    stale = []
 
     paks = []
     if os.path.isdir(pak_dir):
@@ -94,8 +117,29 @@ def audit(root, label):
                 print('          ! role must be "host" or "client"; coop-auth defaults to host silently')
         except OSError as e:
             print('  auth    unreadable: %s' % e)
+
+    # Is the installed DLL newer than the sources it was built from?
+    #
+    # Absence is loud; staleness is not. A deploy copies whatever `CARGO_TARGET_DIR` holds, and two working trees
+    # can point at the same one - this project has a private `local/` tree that does, complete with its own older
+    # `tools/deploy_pak.py`. Building from the older tree overwrites a current `coop_agent.dll` with a previous one
+    # and every file is still present, so the audit said READY while the machine ran older logic. This is the check
+    # that distinguishes the two, and it is why "READY" now means "present *and* current".
+    agent = os.path.join(bin_dir, 'coop_agent.dll')
+    src_newest = newest_agent_source()
+    if os.path.isfile(agent) and src_newest:
+        built = os.path.getmtime(agent)
+        if built < src_newest:
+            stale.append(('coop_agent.dll is older than the sources',
+                          'built %.0f min before the newest .rs - a deploy from a stale tree overwrote it'
+                          % ((src_newest - built) / 60),
+                          agent))
+    for name, why, path in stale:
+        print('  STALE   %s' % name)
+        print('          %s' % why)
+        print('          %s' % path)
     print()
-    return missing
+    return missing + stale
 
 
 def main():

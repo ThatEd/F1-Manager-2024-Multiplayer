@@ -78,6 +78,22 @@ def main():
        'writes the client its own team and loadout, not the host\'s',
        'identical team ids make the two machines fight over one team')
 
+    # Both deploy scripts take their binaries from `CARGO_TARGET_DIR`, which two working trees can share - this
+    # repository has a private `local/` tree that does, with its own older `coop-rs`. Building from the older tree
+    # writes a previous `coop_agent.dll` over a current one and every file is still present, so an audit that only
+    # checks for presence says READY while the machine runs older logic. The deploy must therefore copy from a
+    # build made from *these* sources, which it cannot verify - so the audit checks the mtime instead, and this
+    # asserts that check exists rather than trusting that someone remembers why it is there.
+    audit = os.path.join(ROOT, 'tools', 'deploy_audit.py')
+    if os.path.exists(audit):
+        asrc = open(audit, encoding='utf-8').read()
+        ok('newest_agent_source' in asrc and 'getmtime' in asrc,
+           'the deploy audit notices a coop_agent.dll older than the sources',
+           'present-but-stale is silent; without this the audit reports READY for an old build')
+        ok('STALE' in asrc,
+           'and says so under a name that is not "MISSING"',
+           'a stale file is not a missing one, and conflating them sends the reader looking for the wrong problem')
+
     failed = results.count(False)
     print('\n  %d/%d passed' % (len(results) - failed, len(results)))
     if failed:

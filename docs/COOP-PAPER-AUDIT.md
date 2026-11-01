@@ -939,6 +939,12 @@ it.
 
 ## 23. The SQL capture hook — the producer, built and wired
 
+> **Superseded by §29.2.** The hook below is installed, wired, tested and firing — and on a career write it will
+> never fire, because career writes go through `sqlite3_prepare_v2` + bindings and not through `sqlite3_exec`. Of the
+> 67 statements that *do* reach `sqlite3_exec`, `sqlcap` parses none. The section is kept because the mechanism is
+> correct and the *reason it is pointed at the wrong place* is the lesson; read it as "how to capture SQL at a
+> given function", not as "the producer works".
+
 This is the missing half of §20/§22: the thing that notices the game wrote a career row and knows which row.
 
 ### How
@@ -1196,6 +1202,11 @@ and always exits 0 - the default still exits 1, because for a human "not ready" 
 
 ## 27. Replication, actually built — and the sink that was never registered
 
+> **Superseded by §29.** The sink, the policy, the applier and the wire are all real and tested, and the allowlist
+> they consult was wrong (§29.1), the hook they are fed by watches a function career writes do not use (§29.2), and
+> the team the policy checks comes from a column the statements never set (§29.4). What survives is `Msg::Stmt`,
+> `stmtapply` and `replicate::plan`; what has to be rebuilt is everything that feeds them.
+
 §23 built the capture hook and called it report-only. This makes it replication, and finding why required
 following the path rather than reading it.
 
@@ -1301,11 +1312,15 @@ the clock, contract and vote arbitration, Steam lobby, the deploy. Every one has
 
 | unknown | why it cannot be settled offline |
 |---|---|
-| whether the game's real `UPDATE` shapes parse | `sqlcap` has never seen a live statement; it refuses what it does not recognise and logs the text |
-| whether the real key columns are what the statement says | plausible, but the schema has never been read from a live database |
-| whether `sqlite3_exec`'s live prologue matches the file | checked at install, refused with a reason, but "refuses cleanly" is not "works" |
+| whether the live `sqlite3_exec` prologue matches the file | checked at install, refused with a reason, but "refuses cleanly" is not "works" |
 | whether spawning a process from inside the game's DLL behaves | `CREATE_NO_WINDOW` from a loaded DLL is untested here |
 | whether incidents match (§24) | not implemented at all; the two races will differ |
+| where the career write path binds its values | `sqlite3_prepare_v2` has **133 call sites** and no symbol to find it by (§29.2). Locating the one the career layer uses needs a disassembler against the live process |
+
+**Settled offline since, and the answer was no:** whether the game's real `UPDATE` shapes parse (§29.2 — none of the
+67 exec-visible statements do, and the 361 that carry career data never reach the hooked function), and whether the
+real key columns are what the statement says (§29.1 — they come from `Volta`, and 77 career tables have composite
+keys that one key cannot carry).
 
 So the answer to "100% ready" is **no, and it cannot be yes from here.** What is true: the install is complete and
 verified, both machines audit `READY`, every layer has tests, and each remaining unknown fails *loudly* with a named
@@ -1534,10 +1549,12 @@ dead code, which is the fourth instance in this project of a mechanism that is p
 
 ### What is still not proven
 
-Whether the game's actual `UPDATE` shapes match what `sqlcap` parses. The parser refuses anything it does not
-recognise and logs the text, so the first session where a player signs someone will say exactly how far it got -
-`writes=1 refused=1` with the reason, or `replicated=1` followed by the far machine applying it. That is a
-measurement, not an assumption, and it is the next thing the game can tell us that the repository cannot.
+Whether the career write path can be captured at all. §29.2 settled the old version of this question — the game's
+real `UPDATE` shapes do not reach `sqlite3_exec` and `sqlcap` parses none of the 67 that do — so the producer has to
+move to the bind layer, to a post-hoc DB diff, or to the game's own statement layer, and where exactly the bind
+happens has to be found in a live process (`sqlite3_prepare_v2` has 133 call sites and no symbol). The applier, the
+wire and the policy are measured and tested; everything that feeds them has to be rebuilt, and §29 records why the
+obvious choices are wrong so the next attempt does not repeat them.
 
 ---
 
@@ -1558,10 +1575,11 @@ measurement, not an assumption, and it is the next thing the game can tell us th
 | **`Advance <n>` fired n+1 `AdvanceToNextEvent`**, and one of them at delay 0 | **high** - an extra advance moves the career, so a shared session silently skips a race weekend for both players | **fixed**: loop sends `times - 1`, tail sends the last; two assertions, both reverted to prove they fail |
 | **a declared frame length was trusted without limit** | medium - memory exhaustion reachable from the other machine (`coop-link` had no buffer cap) | **fixed**: `MAX_FRAME` refuses it as an error, so callers resync instead of accumulating |
 | **the resync path never resynced**: `split_frame` returned an empty frame that `drain(..0)` removed nothing of | medium - a corrupt header poisoned the stream forever; with the length cap it would have become a hot loop | **fixed**: `split_frame` returns `Result`, the reader clears and reports the drop |
+| **a stale `coop_agent.dll` would audit as READY**: both deploy scripts take binaries from `CARGO_TARGET_DIR`, and this repository has a private `local/` tree with its own older `coop-rs` and `deploy_pak.py` pointing at the same directory. Building from the older tree overwrites a current DLL with a previous one, and every required file is still present | **high** - the machine would run older logic while every check said installed; measured: the private tree's `replicate.rs` still holds the eight-name allowlist | **fixed**: `deploy_audit.py` compares the installed DLL's mtime against the newest `.rs` and reports `STALE` separately from `MISSING`; proven both directions against a scratch install (stale → `1 problem(s) - not ready`, current → `READY`); `deploy_push_test.py` asserts the check exists |
 | a live-server test had a fixed 12 s deadline that starved under load | low - but a red result that may be noise trains people to ignore red | **fixed**: 60 s, overridable, fails fast if the server exits, and prints its output |
 | **the `press` suite had the same defect a second time**: `15 000 ms` twice on a headless `RaceWeekendApp` render, which passed 25/25 alone and reported 23/25 inside `run_all_tests.py` | low, but it is the failure mode that erodes trust in the suite: a red that is really "the Rust build was also running" | **fixed**: one overridable `WAIT_BUDGET_MS` (60 s, `COOP_PRESS_WAIT_MS`) for every wait in the file, and the failure message now prints the budget it used rather than a hardcoded number that can drift from the code |
 | **`coop-link` wrote received saves to a hardcoded `SaveGames`**, while the game keeps one folder per profile | **high on another machine** - the transfer reports success and the save lands where the game never looks | **fixed**: picks the folder whose newest `.sav` is newest; tested on a synthetic layout and against the real one |
-| **the career layer is designed and not built**: nothing on the wire carries management state, so both players edit one DB and only the host's edits survive a save | **critical for the stated goal** - "a full career together" is not achievable as built, and Versus advertises a garage it cannot provide | **built (§22, §23, §27)**: `Msg::Stmt` carries a typed row change, `stmtapply` applies it as one bounded `UPDATE` (proven against real SQLite), the hook captures the game's statements, a policy decides what may replicate, and the receiving side applies it. Whether the game's real SQL matches the parser is the one thing left, and the log reports it either way |
+| **the career layer is designed and not built**: nothing on the wire carries management state, so both players edit one DB and only the host's edits survive a save | **critical for the stated goal** - "a full career together" is not achievable as built, and Versus advertises a garage it cannot provide | **transport built; producer and policy found wrong (§29)**: `Msg::Stmt` carries a typed row change and `stmtapply` applies it as one bounded `UPDATE` (proven against real SQLite), but the allowlist named catalogues instead of tables, the capture hook watches `sqlite3_exec` which career writes never reach, and no replicable `UPDATE` names the team. What was believed here ("whether the game's real SQL matches the parser is the one thing left") was settled offline in §29 and the answer was no |
 | **~200 MiB/s is copied out of the game per snapshot** to build a 2.4 KiB frame (10.07 MiB read at 20 Hz) | medium - works, but the cost model was never checked, and a live test would blame the network | **fixed**: `read_cars_sparse` reads ~83 KiB per snapshot for identical output, behind `--sparse` |
 | `FRAME_GAP` was a 25 ms "rate limiter" that nothing read | low - a name that implies back-pressure that does not exist | **fixed**: removed, with the reason recorded where it lived |
 | **incidents and faults are not replicated at all**: the wire carries car *positions*, so each sim rolls its own dice and the two races contain different events | **critical for "watch the same race"** - the most user-visible failure left | **open** (§24): `RNG-DETERMINISM.md` §5.2 specifies the replay format and nothing implements it. Blocked on locating the roll site, which is `unknown` and needs the live process |
