@@ -34,7 +34,7 @@ pub const MAGIC: [u8; 4] = *b"F1CP";
 /// would decode a truncated `Agent` (pid and address, no side) and then delete the remainder as trailing
 /// bytes, so it would look like a working link while every coordination frame was refused for want of a
 /// side. Refusing at the header is the difference between a clear error and a silent half-message.
-pub const VERSION: u16 = 3;
+pub const VERSION: u16 = 4;
 pub const HEADER_LEN: usize = 14;
 pub const CAR_COUNT: usize = 22;
 
@@ -355,9 +355,16 @@ pub enum Msg {
         /// Table name, as the game writes it (`Player`, `StaffPS`, ...). Used to find the catalogued statement
         /// and to attribute the write to a team for `coop-auth`; never interpolated into SQL.
         table: Vec<u8>,
+        /// Primary-key **column name**, from the statement's own `WHERE`.
+        ///
+        /// Carried explicitly, and this field was missing at first. The sender parsed it out of the SQL already -
+        /// `UPDATE StaffPS SET ... WHERE StaffID = 7` names it - so dropping it here forced the receiver to guess,
+        /// and the guess was `format!("{table}ID")`, which produces `StaffPSID` and fails with "no such column" on
+        /// every single replicated change. A key *value* without its column name does not identify a row.
+        pk_column: Vec<u8>,
         /// Primary-key value of the row being changed.
         pk: i64,
-        /// Column assignments, `(column name, value)`, applied as one parameterised `UPDATE`.
+        /// Column assignments, `(column name, value)`, applied as one `UPDATE`.
         set: Vec<(Vec<u8>, StmtValue)>,
     },
 }
@@ -706,12 +713,14 @@ pub fn encode(msg: &Msg) -> Vec<u8> {
             w.u8(*team);
             w.u8(side.as_u8());
         }
-        Msg::Stmt { seq, table, pk, set } => {
+        Msg::Stmt { seq, table, pk_column, pk, set } => {
             w.u8(TAG_STMT);
             w.u32(*seq);
             // Length-prefixed, and the table name is bounded by the same 1 MiB frame cap as everything else.
             w.u8(table.len() as u8);
             w.raw(table);
+            w.u8(pk_column.len() as u8);
+            w.raw(pk_column);
             // `pk` is signed: the game's keys are positive, but a schema that used a signed key would silently
             // wrap here rather than fail.
             w.raw(&pk.to_le_bytes());
@@ -837,6 +846,8 @@ pub fn decode(frame: &[u8]) -> Result<Msg, ProtoError> {
             let seq = r.u32()?;
             let tlen = r.u8()? as usize;
             let table = r.take(tlen)?.to_vec();
+            let klen = r.u8()? as usize;
+            let pk_column = r.take(klen)?.to_vec();
             let mut pkb = [0u8; 8];
             pkb.copy_from_slice(r.take(8)?);
             let pk = i64::from_le_bytes(pkb);
@@ -868,7 +879,7 @@ pub fn decode(frame: &[u8]) -> Result<Msg, ProtoError> {
                 };
                 set.push((col, val));
             }
-            Msg::Stmt { seq, table, pk, set }
+            Msg::Stmt { seq, table, pk_column, pk, set }
         }
         TAG_SESSION_READY => Msg::SessionReady { total: r.u64()?, hash: r.u32()? },
         TAG_ORDERS => {
@@ -1002,6 +1013,7 @@ mod tests {
         let msg = Msg::Stmt {
             seq: 42,
             table: b"StaffPS".to_vec(),
+            pk_column: b"StaffID".to_vec(),
             pk: 1234567,
             set: vec![
                 (b"TeamID".to_vec(), StmtValue::Int(7)),
@@ -1024,6 +1036,7 @@ mod tests {
         let msg = Msg::Stmt {
             seq: 1,
             table: b"Player".to_vec(),
+            pk_column: b"PlayerID".to_vec(),
             pk: 1,
             set: vec![(b"TeamID".to_vec(), StmtValue::Text(injection.clone()))],
         };
@@ -1051,6 +1064,8 @@ mod tests {
         payload.extend_from_slice(&1u32.to_le_bytes()); // seq
         payload.push(1); // table len
         payload.push(b'T'); // table
+        payload.push(1); // key column len
+        payload.push(b'K'); // key column
         payload.extend_from_slice(&0i64.to_le_bytes()); // pk
         payload.push(1); // one assignment
         payload.push(1); // column len

@@ -238,8 +238,16 @@ if shutil.which("node"):
     # exchange coordination frames and a clone should not silently lose that coverage.
     supervisor = os.path.join(os.environ.get("CARGO_TARGET_DIR", os.path.join(HERE, "coop-rs", "target")),
                               "release", "coop-supervisor.exe")
+    # `needs="build"` *always*, not only when the binary is absent.
+    #
+    # It used to be `needs=None if os.path.exists(supervisor) else "build"`, i.e. build only if missing. A stale
+    # binary satisfies "exists", so after the protocol moved to version 4 this suite spoke v4 frames to a v3
+    # supervisor and 11 of its 16 assertions failed - looking like a coordination regression when the real cause was
+    # a two-day-old executable. The same staleness on a deployed machine would reject every frame.
+    #
+    # Cargo is incremental, so rebuilding when nothing changed costs about a second and is always correct.
     suite("e2e", ["node", "agent_coord_e2e.js"], HEADLESS, lambda out: passed_count(out, 20),
-          needs=None if os.path.exists(supervisor) else "build")
+          needs="build")
 
 
 def build_supervisor():

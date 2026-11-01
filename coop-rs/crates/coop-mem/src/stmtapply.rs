@@ -160,6 +160,7 @@ mod tests {
         Msg::Stmt {
             seq: 1,
             table: table.as_bytes().to_vec(),
+            pk_column: b"PlayerID".to_vec(),
             pk: 99,
             set: cols
                 .iter()

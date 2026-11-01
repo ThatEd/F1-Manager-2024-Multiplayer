@@ -315,7 +315,7 @@ mod tests {
         }
         // And the inbound half, or replication is send-only.
         assert!(
-            src.contains("Msg::Stmt { seq, table, pk, set }"),
+            src.contains("Msg::Stmt { seq, table, pk_column, pk, set }"),
             "the agent must handle an incoming Msg::Stmt, or changes are never applied"
         );
         assert!(

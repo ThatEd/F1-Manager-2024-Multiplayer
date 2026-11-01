@@ -1250,6 +1250,71 @@ allowlists identifiers, renders values as typed literals, and takes the predicat
 never become SQL syntax.** If no database attaches, the change is reported refused rather than dropped, because the
 two look identical from the far end.
 
+---
+
+## 28. "Are we 100% ready?" — the question that found two more bugs
+
+Answering that honestly meant tracing a single replicated change across both machines instead of re-reading the
+tests, and the trace found two defects that would each have failed every replication silently.
+
+### 28.1 The key column was a guess, so every replicated UPDATE would have failed
+
+`Msg::Stmt` carried the row's key **value** but not the key **column name**, even though the sender had parsed it out
+of the SQL already (`UPDATE StaffPS SET ... WHERE StaffID = 7` names it). The receiver made up for the gap with:
+
+```rust
+let pk_column = format!("{table}ID");   // "StaffPSID"
+```
+
+`StaffPSID` is not a column. Every replicated change would have failed with *no such column*, logged as a refusal,
+on both machines, forever. The fix is one field: `pk_column` is now on the wire, parsed from the statement's own
+`WHERE`, and `VERSION` moved 3 → 4 because the frame layout changed. A key value without its column name does not
+identify a row.
+
+This is the kind of defect the earlier tests could not catch: `to_update` was correct, `to_update` was tested, and
+`to_update` was being called - with an argument that was invented rather than received.
+
+### 28.2 The capture chain was connected at neither end
+
+`sqlhook` was installed, its callback registered, and `set_sink` was called **only from tests** - so the hook fired on
+every `sqlite3_exec` and discarded the text, and `classify` was never reached outside its own unit tests. Every piece
+worked; nothing connected them. That is the third instance of this pattern here (`coop-auth` complete and uncalled,
+the auth gate documented and unenforced, this), so the fix is structural: `install_exec` and `set_sink` sit in the
+same block with a comment on why they must not be separated, and a test asserts the **whole chain** - install →
+callback → sink → classify → plan → queue → inbound `Msg::Stmt` → `stmtapply`. Deleting the sink line fails that test
+naming the exact link.
+
+### 28.3 What the trace did confirm
+
+* The **supervisor forwards `Msg::Stmt`.** `arbitrate`'s fallback is `_ => Ruling::Pass`, and frames from an agent
+  socket go to `deliver_to_agent`, which writes the frame to the other side's agent - and the agent is what applies
+  SQL. So replication reaches the machine that needs it.
+* The **agent applies it** on its inbound loop, through `note_inbound` → `describe_inbound` → `apply_remote_stmt`.
+* `coop-link` needs no change for this: it moves car frames, not career ones.
+
+### 28.4 So: not 100%, and here is the honest split
+
+**Built and unit-tested, never executed against the game:** replication end to end, the sim hook, the SQL capture,
+the clock, contract and vote arbitration, Steam lobby, the deploy. Every one has tests; none has run in the game.
+
+**Known-unproven, and only the game can settle it:**
+
+| unknown | why it cannot be settled offline |
+|---|---|
+| whether the game's real `UPDATE` shapes parse | `sqlcap` has never seen a live statement; it refuses what it does not recognise and logs the text |
+| whether the real key columns are what the statement says | plausible, but the schema has never been read from a live database |
+| whether `sqlite3_exec`'s live prologue matches the file | checked at install, refused with a reason, but "refuses cleanly" is not "works" |
+| whether spawning a process from inside the game's DLL behaves | `CREATE_NO_WINDOW` from a loaded DLL is untested here |
+| whether incidents match (§24) | not implemented at all; the two races will differ |
+
+So the answer to "100% ready" is **no, and it cannot be yes from here.** What is true: the install is complete and
+verified, both machines audit `READY`, every layer has tests, and each remaining unknown fails *loudly* with a named
+reason rather than silently. That is the strongest position reachable without launching the game.
+
+---
+
+## Summary of what this audit changed
+
 ### What is still not proven
 
 Whether the game's actual `UPDATE` shapes match what `sqlcap` parses. The parser refuses anything it does not

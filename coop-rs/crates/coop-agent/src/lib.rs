@@ -226,16 +226,17 @@ fn describe_inbound(frame: &[u8]) -> String {
                 format!("the other player took team {team}")
             }
         }
-        Ok(Msg::Stmt { seq, table, pk, set }) => {
+        Ok(Msg::Stmt { seq, table, pk_column, pk, set }) => {
             let table = String::from_utf8_lossy(&table).to_string();
-            match apply_remote_stmt(&table, pk, &set) {
+            let pk_column = String::from_utf8_lossy(&pk_column).to_string();
+            match apply_remote_stmt(&table, &pk_column, pk, &set) {
                 Ok(applied) => {
                     STMT_APPLIED.fetch_add(1, Ordering::Relaxed);
-                    format!("replicated #{seq}: {table} {} -> {applied}", pk)
+                    format!("replicated #{seq}: {table} {pk_column}={pk} -> {applied}")
                 }
                 Err(why) => {
                     STMT_REFUSED_IN.fetch_add(1, Ordering::Relaxed);
-                    format!("could not apply replicated #{seq} {table} {pk}: {why}")
+                    format!("could not apply replicated #{seq} {table} {pk_column}={pk}: {why}")
                 }
             }
         }
@@ -738,6 +739,10 @@ fn stmt_frame(p: &coop_mem::replicate::Planned) -> Result<Vec<u8>, String> {
     Ok(encode(&Msg::Stmt {
         seq,
         table: p.table.clone().into_bytes(),
+        // The real key column, parsed from the statement's own `WHERE`. Dropping this was the bug: the receiver
+        // guessed `format!("{table}ID")`, producing `StaffPSID`, and every replicated change failed with "no such
+        // column" without anything saying why.
+        pk_column: p.key_column.clone().into_bytes(),
         pk,
         set: p.set.iter().map(|(c, v)| (c.clone().into_bytes(), val(v))).collect(),
     }))
@@ -763,19 +768,20 @@ pub fn stmt_apply_stats() -> (u64, u64) {
 ///
 /// Runs on the inbound path (a worker thread), not the game thread: SQLite serialises its own access, and the
 /// alternative - staging this into the sim mailbox - would tie career edits to a race being in progress.
-fn apply_remote_stmt(table: &str, pk: i64, set: &[(Vec<u8>, coop_proto::StmtValue)]) -> Result<String, String> {
+fn apply_remote_stmt(table: &str, pk_column: &str, pk: i64,
+                     set: &[(Vec<u8>, coop_proto::StmtValue)]) -> Result<String, String> {
     // Build the same `Msg::Stmt` the applier expects, so there is one code path rather than two.
     let msg = Msg::Stmt {
         seq: 0,
         table: table.as_bytes().to_vec(),
+        pk_column: pk_column.as_bytes().to_vec(),
         pk,
         set: set.to_vec(),
     };
-    // The peer's key column is not on the wire (it is implied by the row), so it is looked up locally. `ID` is the
-    // conventional name in this schema and the catalogue's statements key on `<Table>ID`; using the table name is
-    // the closest thing to a rule the schema actually has.
-    let pk_column = format!("{table}ID");
-    let update = coop_mem::stmtapply::to_update(&msg, &pk_column)
+    // The key column comes from the peer's own statement, not from a guess. `to_update` still allowlists it, so a
+    // hostile or buggy peer cannot inject a predicate - but it no longer has to be invented, which is what made
+    // every replicated change fail with "no such column" when this guessed `{table}ID`.
+    let update = coop_mem::stmtapply::to_update(&msg, pk_column)
         .map_err(|r| r.message())?;
 
     // Attached per call rather than cached: `LiveDb` holds raw handles in `Cell`s and so is not `Sync`, and making
