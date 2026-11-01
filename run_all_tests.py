@@ -215,6 +215,12 @@ if shutil.which("node"):
     suite("diff", [sys.executable, "-I", os.path.join(TOOLS, "quote_probe.py")],
           HERE, lambda out: passed_count(out, 12))
 
+    # Does the whole producer work against the game's own data? Not the diffing logic - that is unit-tested -
+    # but the SQL it emits, the decoder it feeds, and the policy that accepts the result. Requires Volta.json,
+    # so a clone without the export reports SKIP rather than failing, the same policy as the render suites.
+    suite("diffwire", [sys.executable, "-I", os.path.join(TOOLS, "diffwire_test.py")],
+          HERE, lambda out: "DIFFWIRE OK" in out or out.strip().startswith("SKIP"))
+
     # Is an install complete? The failure mode is never "the deploy failed" - it is "the deploy installed almost
     # everything", and each missing piece is silent in a different way (version.dll absent = agent never loads;
     # coop_proxy.enable absent = forwarder inert by design; auth files absent = every team rule passes). This was

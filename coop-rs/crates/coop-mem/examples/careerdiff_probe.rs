@@ -146,4 +146,34 @@ fn main() {
         std::process::exit(1);
     }
     println!("\nOK: the diff producer works against the game's own schema.");
+
+    // And what the wire would carry: the pass's changes, attributed and keyed, ready for replicate::plan.
+    let pass = careerdiff::compare(&after, &edited);
+    let (changes, uncarriable) = pass.changes();
+    println!("the wire would carry {} change(s), {} row(s) not carriable", changes.len(), uncarriable);
+    for c in &changes {
+        println!("  {} SET {} WHERE {} = {}", c.table,
+            c.set.iter().map(|(k, _)| k.as_str()).collect::<Vec<_>>().join(", "),
+            c.key.as_ref().map(|(k, _)| k.as_str()).unwrap_or("?"),
+            c.key.as_ref().map(|(_, v)| v.as_text()).unwrap_or_default());
+    }
+    // The point of carrying the team: `replicate::plan` must accept the change, which is what §29.4 found it
+    // could not do for a statement-produced change. A plan that refuses here means attribution is broken and
+    // the whole producer is inert, so this is an assertion rather than a log line.
+    let mut planned = 0;
+    for c in &changes {
+        let cfg = Some((coop_auth::Mode::Versus, coop_auth::Player::new(1, 0, true)));
+        match coop_mem::replicate::plan(c, cfg) {
+            Ok(p) => {
+                println!("  plan: {} where {}={} -> replicate", p.table, p.key_column, p.key_value.as_text());
+                planned += 1;
+            }
+            Err(r) => println!("  plan: {} refused ({})", c.table, r.reason()),
+        }
+    }
+    if planned != changes.len() {
+        println!("FAIL: {}/{} changes were accepted by replicate::plan", planned, changes.len());
+        std::process::exit(1);
+    }
+    println!("every change the pass produced is accepted by replicate::plan");
 }

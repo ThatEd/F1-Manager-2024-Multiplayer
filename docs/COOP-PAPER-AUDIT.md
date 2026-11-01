@@ -1607,17 +1607,49 @@ therefore separates `changed` from `added`/`removed`, and `Pass::uncarriable` co
 **"N rows could not be carried"** instead of dropping them. That counter going non-zero is the evidence that
 `Msg::Stmt` needs an INSERT form; it is deliberately not guessed at here.
 
+### 30.3 What is built since, and the wiring that makes it run
+
+Since §29 was written, the diff producer is built **and called by the agent**:
+
+| piece | where | what it does |
+|---|---|---|
+| `careerdiff` | `coop-mem/src/careerdiff.rs` | `select_sql`, `columns_sql`, `shape_from`, `parse_rows`, `diff_table`, `compare`, `to_changes`, `Pass::changes` — 16 tables, one pass, one comparison |
+| the poller | `coop-agent/src/lib.rs`, `start_career_diff()` | one `LiveDb` handle in a `Mutex` (a per-pass attach would create a thread inside the game every 3 s), reads through `without_capture`, publishes via `stmt_frame` + `queue_frame` — the same outbox the coordination frames use |
+| the kill switch | `coop_career_diff.txt` beside the exe | `off` stops the producer, because it reads inside the game's process and an operator must be able to stop that |
+| the wiring | `thread_entry`, beside `start_presence()`/`start_join_listener()` | asserted from source by three tests, because "complete but called by nothing" is the fourth defect of exactly this shape in this project |
+
+`replicate::plan` accepts the result — proven, not asserted: `tools/diffwire_test.py` (the `diffwire` suite) generates
+the game's own database from `Volta.json`, runs the real Rust producer against it, edits one column, and asserts
+that the change the pass produces is **accepted by the policy**. That is the §29.4 fix: the diff carries the row's
+own team, so the existing authorisation rule works unweakened instead of refusing every real input.
+
+Two bugs the probes caught in this code, both planted back in to prove the tests fire:
+
+1. `SELECT hex(quote(pk)), *` — the wildcard re-emits the key unencoded beside its encoded copy, so the raw `7`
+   reaches `decode_cell` with odd length and **every row fails**. The column list is now explicit, from
+   `pragma_table_info`, so a patched table needs no code change.
+2. `UPDATE Teams SET TeamName = …, TeamID = 1 WHERE TeamID = 1` — the key leaked into SET because for `Teams` the
+   key *is* the team column. Excluded now, with a test for both the same-key case and `Parts_Designs`, whose key
+   (`DesignID`) is not its team column.
+
+The retry log had a bug of the same family as the rest of this document: the "no database yet" message was gated on
+`DIFF_PASSES % 20`, but `DIFF_PASSES` only advances on a *successful* read, so while the attach keeps failing the
+condition is never true and the message prints every three seconds instead of once a minute. A separate
+`DIFF_ATTACH_ATTEMPTS` counter is the fix, and a test asserts the two are not the same number.
+
+What is deliberately **not** done: `apply_remote_stmt` still attaches per call rather than sharing the poller's
+handle. Two `LiveDb` instances are harmless (separate stubs, separate workers, SQLite serialises access), but one
+handle would serve both. Changing the apply path's lifetime at the same time as wiring a new thread is how a fix
+becomes two bugs, so it is recorded as the next cleanup rather than done silently.
+
 ### What is still missing, honestly
 
-* **Nothing calls it from the agent yet.** `coop-sql --diff-once` / `--diff-forever` are the manual entry points;
-  wiring it to the heartbeat and the outbox is the next step, and is mechanical rather than unknown.
-* **Attribution is fixed for diff-produced changes.** The diff reads every column, so it has the row's `TeamID`;
-  `to_changes` appends it to each change even though it did not move, and two tests prove `replicate::plan` then
-  accepts a change for a table whose key is not its team. The original §29.4 problem - the *statement* never sets
-  the team - is unchanged, which is why the hook-based producer still could not work.
-* **`LiveDb` transport is still untested.** The probes run against a SQLite file; the game's database is reached
+* **The `LiveDb` transport is still untested.** The probes run against a SQLite file; the game's database is reached
   through `sqlite3_exec` in-process. That is the remaining live unknown, and it is the same one §22 has carried
   since it was written.
+* **Rows that are added or deleted cannot be carried** until `Msg::Stmt` has an INSERT/DELETE form. They are counted
+  in `Pass::uncarriable` and printed by the heartbeat, so a first session that adds a scout will say so rather than
+  look successful.
 
 ---
 

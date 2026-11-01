@@ -2166,6 +2166,7 @@ pub fn run(pid: u32, supervisor: &str) {
     let mut last_exec_fires = 0u64;
     let mut last_exec_fires_reported = 0u64;
     let mut ticks_without_fire = 0u32;
+    let mut last_diff_passes = u64::MAX;
     loop {
         // Before anything that can block or retry: a frozen game is exactly when no supervisor is
         // listening, so the dump request must not depend on the connection.
@@ -2250,8 +2251,23 @@ pub fn run(pid: u32, supervisor: &str) {
                     "sql capture is firing but has captured no write it can use. Expected on this build: \
                      career writes go through sqlite3_prepare_v2 + bindings, which this hook cannot see, and \
                      sqlcap recognises none of the statements that do reach sqlite3_exec. Career replication \
-                     cannot work from this hook - see docs/COOP-PAPER-AUDIT.md section 29.2.",
+                     does not use this hook - see career diff below and docs/COOP-PAPER-AUDIT.md section 29.2.",
                 );
+            }
+
+            // The career diff's liveness, reported the same way. Four numbers because they answer different
+            // questions and were previously indistinguishable everywhere else in this project: "no passes" means
+            // the thread is not running or has not attached; "passes but no changes" is correct for an idle career;
+            // "changes but nothing queued" means every one was refused and the log says why; "not carriable" is the
+            // count of added/deleted rows the wire cannot express yet - non-zero there is evidence that Msg::Stmt
+            // needs an INSERT form, not a bug to hide.
+            let dp = DIFF_PASSES.load(Ordering::Relaxed);
+            if dp != last_diff_passes {
+                let (_, tables, changes, uncarriable) = career_diff_stats();
+                last_diff_passes = dp;
+                log(&format!(
+                    "career diff: passes={dp} tables={tables} changes={changes} not_carriable={uncarriable}"
+                ));
             }
         }
         ticks_without_fire = ticks_without_fire.saturating_add(1);
@@ -2492,6 +2508,7 @@ extern "system" fn thread_entry(_param: *mut u8) -> u32 {
 
     start_presence();
     start_join_listener();
+    start_career_diff();
     start(&supervisor_address());
     loop {
         std::thread::sleep(Duration::from_secs(3600));
@@ -2530,6 +2547,179 @@ pub fn start_join_listener() {
 
 #[cfg(not(windows))]
 pub fn start_join_listener() {}
+
+/* ------------------------------------------------------------------------------------------------
+ * The career diff poller.
+ *
+ * Why this exists, and why here
+ * -----------------------------
+ * Audit §29.2 measured that the capture hook cannot work: career writes go through `sqlite3_prepare_v2` + bindings
+ * and never reach the patched `sqlite3_exec`, and `sqlcap` parses none of the 67 statements that do reach it. §30
+ * replaced it with a producer that needs no hook - read the 16 replicable tables and diff consecutive passes, 70
+ * rows and ~8.6 KB on the game's own seed data - and proved that against `Volta`'s schema. This is the wiring.
+ *
+ * One handle, not one per pass
+ * ----------------------------
+ * `LiveDb::attach` finds the database by scanning the process's memory and then starts a worker thread inside the
+ * game. The apply path attaches per call because a career edit happens at human speed; a poller runs every few
+ * seconds and doing the same would create a thread every few seconds inside the game, each one only stopping when
+ * its `LiveDb` drops. So the handle is created once, kept in a `Mutex`, and reused - `LiveDb` is `Send` (it holds
+ * `Cell`s, which make it `!Sync`, not `!Send`), so a `Mutex` is all that is needed.
+ *
+ * Why not shared with `apply_remote_stmt`
+ * ---------------------------------------
+ * It should be, and is not yet: that path still attaches per call. Two `LiveDb` instances are harmless - each has
+ * its own stub and worker, and SQLite serialises access to the database - but it is wasted work, and a single
+ * handle behind this mutex would serve both. Recorded in the audit as the obvious next cleanup rather than done
+ * here, because changing the apply path's lifetime at the same time as wiring a new thread is how a fix becomes two
+ * bugs.
+ */
+
+static CAREER_DB: OnceLock<std::sync::Mutex<Option<coop_mem::livedb::LiveDb>>> = OnceLock::new();
+
+fn career_db() -> &'static std::sync::Mutex<Option<coop_mem::livedb::LiveDb>> {
+    CAREER_DB.get_or_init(|| std::sync::Mutex::new(None))
+}
+
+/// Statistics for the heartbeat line: `(passes, tables read, changes produced, rows not carriable)`.
+pub fn career_diff_stats() -> (u64, u64, u64, u64) {
+    (
+        DIFF_PASSES.load(Ordering::Relaxed),
+        DIFF_TABLES.load(Ordering::Relaxed),
+        DIFF_CHANGES.load(Ordering::Relaxed),
+        DIFF_UNCARRIABLE.load(Ordering::Relaxed),
+    )
+}
+
+static DIFF_PASSES: AtomicU64 = AtomicU64::new(0);
+static DIFF_ATTACH_ATTEMPTS: AtomicU64 = AtomicU64::new(0);
+static DIFF_TABLES: AtomicU64 = AtomicU64::new(0);
+static DIFF_CHANGES: AtomicU64 = AtomicU64::new(0);
+static DIFF_UNCARRIABLE: AtomicU64 = AtomicU64::new(0);
+static DIFF_STARTED: AtomicBool = AtomicBool::new(false);
+
+/// How often to read the replicable tables. Slow on purpose: a career edit is a human action, and every pass is a
+/// set of remote reads inside the game's own process.
+const DIFF_INTERVAL: Duration = Duration::from_secs(3);
+
+/// Starts the poller. Idempotent, and safe to call before a career exists.
+///
+/// `coop_career_diff.txt` beside the exe turns it off. Present-and-not-`off` leaves it on, so the file is a switch
+/// for a live experiment rather than something that has to exist for the mod to work - the same convention as
+/// `coop_tyres.txt`, and the reason is the same: a cost this design is confident about still has to be measurable
+/// in the real game before it is trusted.
+pub fn start_career_diff() {
+    if DIFF_STARTED.swap(true, Ordering::SeqCst) {
+        return;
+    }
+    let path = log_path().with_file_name("coop_career_diff.txt");
+    if let Ok(text) = std::fs::read_to_string(&path) {
+        if text.trim().eq_ignore_ascii_case("off") {
+            log("career diff: disabled by coop_career_diff.txt; career changes will not be replicated");
+            return;
+        }
+    }
+    std::thread::spawn(|| {
+        // Nothing to do in single-player maintenance, and a poller reading the database of a game that has not
+        // loaded a career yet would log an attach failure every three seconds. `configured()` is the same check the
+        // replication policy uses, so the two cannot disagree about whether this is a co-op run.
+        if coop_auth::configured().is_none() {
+            log("career diff: not a co-op run (no coop_mode.txt/coop_player.txt); producer not started");
+            return;
+        }
+        log(&format!("career diff: producer started, every {}s", DIFF_INTERVAL.as_secs()));
+
+        let mut previous: Option<coop_mem::careerdiff::Snapshot> = None;
+        loop {
+            std::thread::sleep(DIFF_INTERVAL);
+
+            // Attach lazily and keep it. A failure is retried with a message, because "no database yet" is the
+            // normal state before a career is loaded and must not be a permanent give-up.
+            //
+            // The failure message is logged at most once a minute, not once a pass - and the pass counter is NOT
+            // incremented while unattached, because that counter is what the heartbeat reads. Counting failed
+            // attempts as passes made the "once a minute" test never true (20 real passes never arrive while the
+            // attach keeps failing), which would have meant one attach-failure line every three seconds forever.
+            // A dedicated counter for the retry rate is the honest fix: the two rates are different facts.
+            let mut guard = match career_db().lock() {
+                Ok(g) => g,
+                Err(p) => p.into_inner(),
+            };
+            if guard.is_none() {
+                let attempts = DIFF_ATTACH_ATTEMPTS.fetch_add(1, Ordering::Relaxed) + 1;
+                match coop_mem::livedb::LiveDb::attach(std::process::id()) {
+                    Ok(db) => {
+                        log("career diff: attached to the live database");
+                        *guard = Some(db);
+                    }
+                    Err(e) => {
+                        if attempts % 20 == 1 {
+                            log(&format!("career diff: no live database yet ({e}); retrying"));
+                        }
+                        continue;
+                    }
+                }
+            }
+            let Some(db) = guard.as_ref() else { continue };
+
+            // Reading must not be captured as a career change; it is a read, but `LiveDb::sql` goes through the
+            // game's own `sqlite3_exec` and the capture hook fires on it. `sqlcap` classifies a SELECT as `Read` and
+            // the sink ignores it, so this is belt and braces - but the suppression is cheap and the alternative is
+            // depending on the classifier being right for every statement this poller ever sends.
+            let snap = without_capture(|| coop_mem::careerdiff::snapshot(db));
+            DIFF_PASSES.fetch_add(1, Ordering::Relaxed);
+            let snap = match snap {
+                Ok(s) => s,
+                Err(e) => {
+                    log(&format!("career diff: pass failed: {e}"));
+                    continue;
+                }
+            };
+            DIFF_TABLES.store(snap.len() as u64, Ordering::Relaxed);
+
+            if let Some(before) = previous.as_ref() {
+                let pass = coop_mem::careerdiff::compare(before, &snap);
+                if !pass.is_empty() {
+                    publish_career_pass(&pass);
+                }
+            }
+            previous = Some(snap);
+        }
+    });
+}
+
+/// Turns one pass into frames on the wire.
+///
+/// Deliberately reports the rows it cannot carry rather than dropping them: `Msg::Stmt` is an `UPDATE`, so a new or
+/// deleted row would have the update match nothing and report success - which is indistinguishable from replication
+/// working. A non-zero `uncarriable` here is the evidence that the wire needs an INSERT/DELETE form.
+fn publish_career_pass(pass: &coop_mem::careerdiff::Pass) {
+    let mut sent = 0u64;
+    // `Pass::changes` supplies the rows itself, so attribution cannot be forgotten at the call site.
+    let (changes, uncarriable) = pass.changes();
+    DIFF_UNCARRIABLE.fetch_add(uncarriable as u64, Ordering::Relaxed);
+    for change in &changes {
+        match coop_mem::replicate::plan(change, coop_auth::configured()) {
+            Ok(planned) => match stmt_frame(&planned) {
+                Ok((_seq, frame)) => {
+                    queue_frame(frame);
+                    sent += 1;
+                }
+                Err(e) => log(&format!("career diff: {} not encoded: {e}", change.table)),
+            },
+            Err(r) => log(&format!("career diff: {} refused: {}", change.table, r.reason())),
+        }
+    }
+    DIFF_CHANGES.fetch_add(sent, Ordering::Relaxed);
+    if sent > 0 || pass.uncarriable > 0 {
+        log(&format!(
+            "career diff: {} change(s) queued across {} table(s), {} row(s) not carriable",
+            sent,
+            pass.diffs.len(),
+            pass.uncarriable
+        ));
+    }
+}
 
 /*
  * Rich presence ticker.
@@ -3146,5 +3336,103 @@ mod tests {
         let line = describe_inbound(&[0u8; 4]);
         assert!(line.contains("unreadable"), "got {line:?}");
         assert!(!line.contains("update both machines"), "got {line:?}");
+    }
+
+    /// The career-diff poller is started by `thread_entry`, and that is the only thing that makes it run.
+    ///
+    /// This project has now hit "the module is complete and nothing calls it" three times (`coop-auth`, the
+    /// auth gate wiring, and the SQL sink registration). A poller is the worst possible version of that defect,
+    /// because nothing fails: the code compiles, the tests pass, the heartbeat line reports the counters as
+    /// zero, and a reader concludes the producer is idle because there is nothing to produce. So the wiring is
+    /// asserted from the source rather than inferred from the existence of the function.
+    #[test]
+    fn the_career_diff_poller_is_started_by_thread_entry() {
+        let src = std::fs::read_to_string(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/src/lib.rs"
+        ))
+        .expect("read the agent source");
+
+        let entry = src.find("extern \"system\" fn thread_entry").expect("thread_entry exists");
+        let after = &src[entry..];
+        let next_fn = after.find("\npub fn ").unwrap_or(after.len());
+        let body = &after[..next_fn];
+
+        assert!(
+            body.contains("start_career_diff()"),
+            "thread_entry must call start_career_diff(), or the producer is never started \
+             (the coop-auth / sink-registration defect, fourth time)"
+        );
+        // And it must be started alongside the other unconditional producers, not inside a branch that a build
+        // flag can leave off.
+        assert!(
+            body.contains("start_presence();") && body.contains("start_join_listener();"),
+            "the poller belongs with the other producers in thread_entry"
+        );
+    }
+
+    /// The poller must be switchable, because it reads inside the game's process.
+    ///
+    /// `coop_career_diff.txt` holding `off` is the kill switch, and it is asserted from the source because the
+    /// failure mode is again silent: a poller that cannot be turned off is a cost the operator cannot stop.
+    #[test]
+    fn the_career_diff_poller_has_a_kill_switch() {
+        let src = std::fs::read_to_string(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/src/lib.rs"
+        ))
+        .expect("read the agent source");
+        let at = src.find("pub fn start_career_diff()").expect("start_career_diff exists");
+        let end = src[at..].find("\npub fn ").map(|i| at + i).unwrap_or(src.len());
+        let body = &src[at..end];
+        assert!(
+            body.contains("coop_career_diff.txt"),
+            "start_career_diff must honour coop_career_diff.txt"
+        );
+    }
+
+    /// And the heartbeat reports the poller's four counters, for the same reason as `sql_capture_stats`.
+    #[test]
+    fn the_heartbeat_reports_career_diff_progress() {
+        let src = std::fs::read_to_string(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/src/lib.rs"
+        ))
+        .expect("read the agent source");
+        let at = src.find("career diff: passes=").expect("the heartbeat line exists");
+        let window = &src[at.saturating_sub(1200)..at];
+        assert!(
+            window.contains("DIFF_PASSES"),
+            "the heartbeat must read DIFF_PASSES, or a stuck poller and an idle one look identical"
+        );
+    }
+
+    /// The attach-retry message rate must not depend on the pass counter.
+    ///
+    /// The first version gated the retry log on `DIFF_PASSES % 20 == 0` and incremented `DIFF_PASSES` on every
+    /// failed attach. While the attach keeps failing - the normal state before a career is loaded - the pass counter
+    /// never reaches 20, so the condition is never true and the message prints every three seconds instead of once
+    /// a minute. Two counters for two rates is the fix, and this test asserts the wiring rather than trusting the
+    /// comment, which is the same discipline as the producer-wiring test above.
+    #[test]
+    fn an_unattached_pass_does_not_count_as_a_pass() {
+        let src = std::fs::read_to_string(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/src/lib.rs"
+        ))
+        .expect("read the agent source");
+        let at = src.find("no live database yet").expect("the retry message exists");
+        let window = &src[at.saturating_sub(1500)..at];
+        assert!(
+            window.contains("DIFF_ATTACH_ATTEMPTS"),
+            "the retry rate must be counted separately from completed passes"
+        );
+        // And the pass counter is incremented only after a read, not on the attach path.
+        let attach_block = &src[at.saturating_sub(1500)..at + 200];
+        assert!(
+            attach_block.matches("DIFF_PASSES.fetch_add").count() == 0
+                || attach_block.contains("DIFF_PASSES.fetch_add(1, Ordering::Relaxed);\n\n            // Reading"),
+            "DIFF_PASSES must not advance while unattached"
+        );
     }
 }

@@ -31,59 +31,10 @@ fn usage() -> ! {
 
 /// One full pass over the replicable tables.
 ///
-/// Reads every column through `hex(quote(col))` so no value can contain the row or column separator
-/// `LiveDb::parse_rows` uses, and so each value comes back with its SQL type intact. The column list comes from the
-/// database (`pragma_table_info`), because the diff has to carry *every* column that could have moved - including
-/// one added by a game patch, which no list in this repository would know about.
+/// Delegates to `careerdiff::snapshot`, which is the same code the agent uses - a second copy here is how the CLI
+/// and the mod drift apart, and the CLI is what a person uses to check the mod is working.
 fn snapshot(db: &LiveDb) -> Result<careerdiff::Snapshot, String> {
-    let mut snap = careerdiff::Snapshot::new();
-    let mut failures = Vec::new();
-    for t in schema::REPLICABLE {
-        // 1. What columns does this table really have?
-        let raw = match db.sql(&careerdiff::columns_sql(t.name)) {
-            Ok(rows) => rows,
-            Err(e) => {
-                failures.push(format!("{}: listing columns failed: {e}", t.name));
-                continue;
-            }
-        };
-        let columns: Vec<String> = raw
-            .iter()
-            .filter_map(|r| r.first().cloned())
-            .filter(|c| !c.is_empty())
-            .collect();
-        let shape = match careerdiff::shape_from(t, &columns) {
-            Ok(s) => s,
-            Err(e) => {
-                failures.push(e);
-                continue;
-            }
-        };
-
-        // 2. Read it.
-        let rows = match db.sql(&careerdiff::select_sql(&shape)) {
-            Ok(rows) => rows,
-            Err(e) => {
-                failures.push(format!("{}: read failed: {e}", t.name));
-                continue;
-            }
-        };
-
-        // 3. Decode. `LiveDb::sql` returns parsed rows, so the framing is rebuilt to reuse `parse_rows`, which is
-        //    the single implementation of the value-decoding rules - sharing it is the honest way to avoid a
-        //    second, drifting copy of the `hex(quote(x))` contract.
-        let text: String = rows.iter().map(|r| r.join("\u{1f}") + "\u{1e}").collect();
-        match careerdiff::parse_rows(text.as_bytes(), &shape.columns, shape.key) {
-            Ok(parsed) => {
-                snap.insert(t.name.to_string(), parsed);
-            }
-            Err(e) => failures.push(format!("{}: {e}", t.name)),
-        }
-    }
-    if !failures.is_empty() {
-        return Err(failures.join("; "));
-    }
-    Ok(snap)
+    careerdiff::snapshot(db)
 }
 
 fn report(pass: &careerdiff::Pass) {

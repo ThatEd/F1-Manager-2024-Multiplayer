@@ -231,6 +231,7 @@ pub fn diff_table(table: &str, before: &[Row], after: &[Row]) -> TableDiff {
     }
     d
 }
+
 /// Compares a whole snapshot. Keyed by table name so the order is stable across passes.
 pub fn diff(before: &Snapshot, after: &Snapshot) -> Vec<TableDiff> {
     let mut out = Vec::new();
@@ -253,7 +254,70 @@ pub fn diff(before: &Snapshot, after: &Snapshot) -> Vec<TableDiff> {
 pub fn compare(before: &Snapshot, after: &Snapshot) -> Pass {
     let diffs = diff(before, after);
     let uncarriable = diffs.iter().map(|d| d.added.len() + d.removed.len()).sum();
-    Pass { diffs, uncarriable }
+    Pass { diffs, uncarriable, rows: after.clone() }
+}
+
+/// One full pass over the replicable tables, through a live database handle.
+///
+/// The column list comes from the database (`pragma_table_info`) rather than from this repository, because the diff
+/// has to carry *every* column that could have moved - including one added by a game patch, which no list here
+/// would know about. Everything is read through `hex(quote(col))` so no value can contain the separator
+/// [`crate::livedb::LiveDb::sql`]'s row callback uses, and so each value keeps its SQL type.
+///
+/// Every table is attempted even after one fails, and the failures are returned together: "which table broke" is
+/// the whole diagnostic value of a pass, and stopping at the first would hide the rest.
+///
+/// Takes `&LiveDb` rather than attaching, so a caller can hold one handle for the session. `LiveDb::attach` starts a
+/// worker thread inside the game, and attaching per pass would create one every few seconds.
+pub fn snapshot(db: &crate::livedb::LiveDb) -> Result<Snapshot, String> {
+    let mut snap = Snapshot::new();
+    let mut failures = Vec::new();
+    for t in schema::REPLICABLE {
+        // 1. What columns does this table really have?
+        let listed = match db.sql(&columns_sql(t.name)) {
+            Ok(rows) => rows,
+            Err(e) => {
+                failures.push(format!("{}: listing columns failed: {e}", t.name));
+                continue;
+            }
+        };
+        let columns: Vec<String> = listed
+            .iter()
+            .filter_map(|r| r.first().cloned())
+            .filter(|c| !c.is_empty())
+            .collect();
+        let shape = match shape_from(t, &columns) {
+            Ok(s) => s,
+            Err(e) => {
+                failures.push(e);
+                continue;
+            }
+        };
+
+        // 2. Read it.
+        let rows = match db.sql(&select_sql(&shape)) {
+            Ok(rows) => rows,
+            Err(e) => {
+                failures.push(format!("{}: read failed: {e}", t.name));
+                continue;
+            }
+        };
+
+        // 3. Decode. `LiveDb::sql` returns parsed rows, so the framing is rebuilt to reuse `parse_rows`, which is
+        //    the single implementation of the value-decoding rules - sharing it is the honest way to avoid a second,
+        //    drifting copy of the `hex(quote(x))` contract.
+        let text: String = rows.iter().map(|r| r.join("\u{1f}") + "\u{1e}").collect();
+        match parse_rows(text.as_bytes(), &shape.columns, shape.key) {
+            Ok(parsed) => {
+                snap.insert(t.name.to_string(), parsed);
+            }
+            Err(e) => failures.push(format!("{}: {e}", t.name)),
+        }
+    }
+    if !failures.is_empty() {
+        return Err(failures.join("; "));
+    }
+    Ok(snap)
 }
 
 /// What one pass over the tables produced, and what could not be carried.
@@ -262,6 +326,11 @@ pub struct Pass {
     pub diffs: Vec<TableDiff>,
     /// Rows that could not be expressed as `Msg::Stmt` because `Msg::Stmt` is an `UPDATE`.
     pub uncarriable: usize,
+    /// The rows as read this pass, so `to_changes` can find each changed row's team without a second read.
+    ///
+    /// Carrying it here rather than re-reading is what keeps `compare` a pure function of two snapshots: the team is
+    /// a property of the row (§29.4), and the row is already in hand.
+    pub rows: Snapshot,
 }
 
 impl Pass {
@@ -271,6 +340,21 @@ impl Pass {
     /// How many single-row changes are ready to send.
     pub fn carriable(&self) -> usize {
         self.diffs.iter().map(|d| d.changed.len()).sum()
+    }
+    /// Every change this pass produced, already attributed and keyed, ready for `replicate::plan`.
+    ///
+    /// The rows are looked up from `self.rows`, so a caller cannot forget to pass them - which is precisely the
+    /// mistake that made `to_changes`'s old signature easy to misuse.
+    pub fn changes(&self) -> (Vec<crate::sqlcap::Change>, usize) {
+        let mut out = Vec::new();
+        let mut uncarriable = self.uncarriable;
+        for d in &self.diffs {
+            let rows = self.rows.get(&d.table).map(|v| v.as_slice()).unwrap_or(&[]);
+            let (mut c, u) = to_changes(d, rows);
+            out.append(&mut c);
+            uncarriable += u;
+        }
+        (out, uncarriable)
     }
 }
 
@@ -296,8 +380,19 @@ pub fn to_changes(d: &TableDiff, rows: &[Row]) -> (Vec<crate::sqlcap::Change>, u
         .changed
         .iter()
         .map(|(key, cells)| {
-            let mut set = cells.clone();
-            // Append the team from the row itself, if the diff did not already carry it.
+            // The key column is the predicate, never an assignment: `UPDATE Teams SET TeamID = 1 WHERE TeamID
+            // = 1` is a no-op at best and, for a table whose key is not its team column, would rewrite the
+            // identity the whole WHERE depends on. `Teams` is exactly that case - keyed and teamed by `TeamID`
+            // - which is how this was caught: the probe printed `Teams SET TeamName, TeamID WHERE TeamID = 1`.
+            let set: Vec<_> = cells
+                .iter()
+                .filter(|(c, _)| !c.eq_ignore_ascii_case(table.pk))
+                .cloned()
+                .collect();
+            // The team is appended even though it did not move, so `replicate::plan` can attribute the change
+            // (§29.4). A normal career edit sets one business column and never the team, so without this every
+            // change would be refused as `NoTeam`.
+            let mut set = set;
             if !set.iter().any(|(c, _)| c.eq_ignore_ascii_case(table.team)) {
                 if let Some(row) = rows.iter().find(|r| &r.key == key) {
                     if let Some((n, v)) = row
@@ -383,29 +478,54 @@ mod tests {
     #[test]
     fn the_team_travels_even_though_it_did_not_change() {
         // `Teams` is keyed by `TeamID`, so the key column and the team column are the same one here - which is the
-        // easy case. A table where they differ is the real test.
-        let before = vec![row(5, &[("DesignID", "5"), ("TeamID", "3"), ("DesignWork", "10")])];
-        let after = vec![row(5, &[("DesignID", "5"), ("TeamID", "3"), ("DesignWork", "11")])];
-        let d = diff_table("Parts_Designs", &before, &after);
+        // case where the key must NOT travel as an assignment.
+        let before = vec![row(1, &[("TeamID", "1"), ("TeamName", "'McLaren'")])];
+        let after = vec![row(1, &[("TeamID", "1"), ("TeamName", "'McLaren Racing'")])];
+        let d = diff_table("Teams", &before, &after);
         assert_eq!(d.changed.len(), 1);
-        assert_eq!(d.changed[0].1.len(), 1, "only DesignWork moved");
+        assert_eq!(d.changed[0].1.len(), 1, "only TeamName moved");
 
         let (changes, uncarriable) = to_changes(&d, &after);
         assert_eq!(uncarriable, 0);
         assert_eq!(changes.len(), 1);
         let c = &changes[0];
-        // The changed column, plus the team, or `plan` refuses it as `NoTeam`.
-        assert!(c.set.iter().any(|(n, _)| n == "DesignWork"), "{:?}", c.set);
+        // The changed column, plus the team, or `plan` refuses the change as `NoTeam`.
+        assert!(c.set.iter().any(|(n, _)| n == "TeamName"), "{:?}", c.set);
         assert!(
-            c.set.iter().any(|(n, v)| n.eq_ignore_ascii_case("TeamID") && *v == Value::Int(3)),
+            c.set.iter().any(|(n, v)| n.eq_ignore_ascii_case("TeamID") && *v == Value::Int(1)),
             "the team must travel or plan refuses the change: {:?}",
             c.set
         );
-        assert_eq!(c.key.as_ref().map(|(k, _)| k.as_str()), Some("DesignID"));
+        // And the key must not: it is the predicate, and assigning it is a no-op at best.
+        assert_eq!(
+            c.set.iter().filter(|(n, _)| n.eq_ignore_ascii_case("TeamID")).count(),
+            1,
+            "the team column appears once - as the attribution, not as a second assignment"
+        );
+        assert_eq!(c.key.as_ref().map(|(k, _)| k.as_str()), Some("TeamID"));
 
         // And the policy accepts it, which is the point of carrying the team at all.
-        let cfg = Some((coop_auth::Mode::Versus, coop_auth::Player::new(3, 0, true)));
+        let cfg = Some((coop_auth::Mode::Versus, coop_auth::Player::new(1, 0, true)));
         crate::replicate::plan(c, cfg).expect("the plan must accept a diff-produced change");
+    }
+
+    /// A table whose key is not its team column must not put the key into the SET list at all.
+    ///
+    /// `Parts_Designs` is keyed `DesignID` and teamed by `TeamID`. Assigning `DesignID` in an UPDATE whose WHERE
+    /// is `DesignID = x` would rewrite the identity the predicate depends on - at best a no-op, at worst a row
+    /// that no longer matches anything.
+    #[test]
+    fn the_key_column_is_never_an_assignment() {
+        let before = vec![row(5, &[("DesignID", "5"), ("TeamID", "3"), ("DesignWork", "10")])];
+        let after = vec![row(5, &[("DesignID", "5"), ("TeamID", "3"), ("DesignWork", "11")])];
+        let d = diff_table("Parts_Designs", &before, &after);
+        let (changes, _) = to_changes(&d, &after);
+        assert_eq!(changes.len(), 1);
+        assert!(
+            !changes[0].set.iter().any(|(n, _)| n.eq_ignore_ascii_case("DesignID")),
+            "the key must be the predicate, not an assignment: {:?}",
+            changes[0].set
+        );
     }
 
     #[test]
@@ -539,7 +659,33 @@ mod tests {
         let d = diff(&before, &after);
         assert_eq!(d.len(), 1, "an unchanged table must not appear");
         assert_eq!(d[0].table, "Teams");
-        let pass = Pass { diffs: d, uncarriable: 0 };
+        let pass = compare(&before, &after);
         assert_eq!(pass.carriable(), 1);
+        // The rows travel with the pass, so attribution does not need a second read.
+        assert_eq!(pass.rows.get("Teams").map(|r| r.len()), Some(1));
+    }
+
+    #[test]
+    fn a_pass_supplies_its_own_rows_for_attribution() {
+        // The reason `Pass` carries the rows: `to_changes` needs each changed row's team, and a caller that had to
+        // remember to pass them separately is how attribution silently stops working.
+        let before: Snapshot = [(
+            "Parts_Designs".to_string(),
+            vec![row(5, &[("DesignID", "5"), ("TeamID", "3"), ("DesignWork", "10")])],
+        )]
+        .into_iter()
+        .collect();
+        let after: Snapshot = [(
+            "Parts_Designs".to_string(),
+            vec![row(5, &[("DesignID", "5"), ("TeamID", "3"), ("DesignWork", "12")])],
+        )]
+        .into_iter()
+        .collect();
+        let (changes, uncarriable) = compare(&before, &after).changes();
+        assert_eq!(uncarriable, 0);
+        assert_eq!(changes.len(), 1);
+        assert!(changes[0].set.iter().any(|(n, v)| n == "TeamID" && *v == Value::Int(3)));
+        let cfg = Some((coop_auth::Mode::Versus, coop_auth::Player::new(3, 0, true)));
+        crate::replicate::plan(&changes[0], cfg).expect("attributed from the pass's own rows");
     }
 }
