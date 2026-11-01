@@ -205,6 +205,16 @@ if shutil.which("node"):
     suite("schema", [sys.executable, "-I", os.path.join(TOOLS, "schema_truth.py")],
           HERE, lambda out: ("SCHEMA OK" in out) or out.strip().startswith("SKIP"))
 
+    # Does the diff producer work against the game's own schema?
+    #
+    # Audit §29.2 found the capture hook cannot work: career writes use `sqlite3_prepare_v2` + bindings and never
+    # reach the patched `sqlite3_exec`. `careerdiff` replaces it by reading the 16 replicable tables and diffing
+    # consecutive reads, which needs no hook at all. A unit test with hand-written rows cannot show that the SQL it
+    # emits runs against the real database - and the first version's `SELECT hex(quote(pk)), *` re-emitted the key
+    # unencoded and failed to decode every row. This runs the real code against `Volta`'s schema and seed data.
+    suite("diff", [sys.executable, "-I", os.path.join(TOOLS, "quote_probe.py")],
+          HERE, lambda out: passed_count(out, 12))
+
     # Is an install complete? The failure mode is never "the deploy failed" - it is "the deploy installed almost
     # everything", and each missing piece is silent in a different way (version.dll absent = agent never loads;
     # coop_proxy.enable absent = forwarder inert by design; auth files absent = every team rule passes). This was

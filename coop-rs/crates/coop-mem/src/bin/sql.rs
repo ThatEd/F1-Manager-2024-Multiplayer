@@ -4,19 +4,109 @@
 //! coop-sql --pid <pid> "SELECT TeamID FROM Player"
 //! coop-sql --pid <pid> --file statements.sql
 //! coop-sql --pid <pid> --swap-contracts 8 83          # swap the two drivers' teams
+//! coop-sql --pid <pid> --diff-once                    # one pass of the career diff producer
+//! coop-sql --pid <pid> --diff-forever                 # the same, every few seconds, logging changes
 //! ```
 //!
 //! Everything goes through the game's own `sqlite3_exec`, so the page cache, locking and save
 //! pipeline behave exactly as they do for the game. Nothing here writes to game memory directly.
+//!
+//! `--diff-*` exists because the capture hook cannot work (audit §29.2): career writes go through
+//! `sqlite3_prepare_v2` + bindings and never reach the patched `sqlite3_exec`. Reading the 16 replicable tables
+//! and diffing consecutive reads needs no hook, and a full pass is 70 rows / ~4.5 KB on the game's own seed data
+//! (`tools/quote_probe.py` measures it). `--diff-forever` is what an agent would call; `--diff-once` is what a
+//! person calls to see it work.
 
 use coop_mem::livedb::LiveDb;
+use coop_mem::{careerdiff, schema};
 
 fn usage() -> ! {
     eprintln!("coop-sql --pid <pid> (<sql> | --file <path> | --swap-contracts <idA> <idB>)");
+    eprintln!("        [--diff-once | --diff-forever [--interval <secs>]]");
     eprintln!();
     eprintln!("Runs SQL inside the game's own SQLite database. The career database is in-memory,");
     eprintln!("so this is the only way to read or change it while the game is running.");
     std::process::exit(2);
+}
+
+/// One full pass over the replicable tables.
+///
+/// Reads every column through `hex(quote(col))` so no value can contain the row or column separator
+/// `LiveDb::parse_rows` uses, and so each value comes back with its SQL type intact. The column list comes from the
+/// database (`pragma_table_info`), because the diff has to carry *every* column that could have moved - including
+/// one added by a game patch, which no list in this repository would know about.
+fn snapshot(db: &LiveDb) -> Result<careerdiff::Snapshot, String> {
+    let mut snap = careerdiff::Snapshot::new();
+    let mut failures = Vec::new();
+    for t in schema::REPLICABLE {
+        // 1. What columns does this table really have?
+        let raw = match db.sql(&careerdiff::columns_sql(t.name)) {
+            Ok(rows) => rows,
+            Err(e) => {
+                failures.push(format!("{}: listing columns failed: {e}", t.name));
+                continue;
+            }
+        };
+        let columns: Vec<String> = raw
+            .iter()
+            .filter_map(|r| r.first().cloned())
+            .filter(|c| !c.is_empty())
+            .collect();
+        let shape = match careerdiff::shape_from(t, &columns) {
+            Ok(s) => s,
+            Err(e) => {
+                failures.push(e);
+                continue;
+            }
+        };
+
+        // 2. Read it.
+        let rows = match db.sql(&careerdiff::select_sql(&shape)) {
+            Ok(rows) => rows,
+            Err(e) => {
+                failures.push(format!("{}: read failed: {e}", t.name));
+                continue;
+            }
+        };
+
+        // 3. Decode. `LiveDb::sql` returns parsed rows, so the framing is rebuilt to reuse `parse_rows`, which is
+        //    the single implementation of the value-decoding rules - sharing it is the honest way to avoid a
+        //    second, drifting copy of the `hex(quote(x))` contract.
+        let text: String = rows.iter().map(|r| r.join("\u{1f}") + "\u{1e}").collect();
+        match careerdiff::parse_rows(text.as_bytes(), &shape.columns, shape.key) {
+            Ok(parsed) => {
+                snap.insert(t.name.to_string(), parsed);
+            }
+            Err(e) => failures.push(format!("{}: {e}", t.name)),
+        }
+    }
+    if !failures.is_empty() {
+        return Err(failures.join("; "));
+    }
+    Ok(snap)
+}
+
+fn report(pass: &careerdiff::Pass) {
+    for d in &pass.diffs {
+        for (key, cells) in &d.changed {
+            let cols: Vec<String> = cells
+                .iter()
+                .map(|(c, v)| format!("{c}={}", v.as_text()))
+                .collect();
+            println!("  {}.{} {}", d.table, key.as_text(), cols.join(" "));
+        }
+        if !d.added.is_empty() {
+            println!("  {} added {} row(s) - not carriable until Msg::Stmt has an INSERT", d.table, d.added.len());
+        }
+        if !d.removed.is_empty() {
+            println!("  {} removed {} row(s) - not carriable", d.table, d.removed.len());
+        }
+    }
+    println!(
+        "  {} change(s) ready to send, {} row(s) that cannot be expressed as an UPDATE",
+        pass.carriable(),
+        pass.uncarriable
+    );
 }
 
 fn main() {
@@ -47,6 +137,56 @@ fn main() {
         Err(e) => {
             eprintln!("probe failed: {e}");
             std::process::exit(1);
+        }
+    }
+
+    if args.iter().any(|a| a == "--diff-once" || a == "--diff-forever") {
+        let once = args.iter().any(|a| a == "--diff-once");
+        let secs: u64 = get("--interval").and_then(|s| s.parse().ok()).unwrap_or(3);
+        eprintln!("[stage] reading {} replicable tables", schema::REPLICABLE.len());
+        let mut before = match snapshot(&db) {
+            Ok(s) => s,
+            Err(e) => {
+                eprintln!("first pass failed: {e}");
+                std::process::exit(1);
+            }
+        };
+        let rows: usize = before.values().map(|r| r.len()).sum();
+        println!("baseline: {} rows across {} tables", rows, before.len());
+        if once {
+            // A second pass immediately after shows the machinery end to end without needing an edit in between:
+            // it must report zero changes, and a non-zero result here would mean the read is not stable, which
+            // would put a permanent stream of phantom changes on the wire.
+            std::thread::sleep(std::time::Duration::from_millis(200));
+            let after = match snapshot(&db) {
+                Ok(s) => s,
+                Err(e) => {
+                    eprintln!("second pass failed: {e}");
+                    std::process::exit(1);
+                }
+            };
+            let pass = careerdiff::compare(&before, &after);
+            println!("second pass:");
+            report(&pass);
+            if pass.is_empty() {
+                println!("stable: two consecutive passes agree, so an unchanged career sends nothing");
+            }
+            return;
+        }
+        loop {
+            std::thread::sleep(std::time::Duration::from_secs(secs));
+            let after = match snapshot(&db) {
+                Ok(s) => s,
+                Err(e) => {
+                    eprintln!("pass failed: {e}");
+                    continue;
+                }
+            };
+            let pass = careerdiff::compare(&before, &after);
+            if !pass.is_empty() {
+                report(&pass);
+            }
+            before = after;
         }
     }
 

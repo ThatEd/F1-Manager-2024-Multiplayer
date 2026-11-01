@@ -27,6 +27,7 @@ pub mod sqlcap;
 pub mod replicate;
 pub mod schema;
 pub mod stmtapply;
+pub mod careerdiff;
 
 
 const PROCESS_VM_READ: u32 = 0x0010;

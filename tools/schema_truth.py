@@ -145,6 +145,22 @@ def dump(path):
     return 0
 
 
+def write_volta(path):
+    """Write `Volta.Data` out as a real SQLite file, for the probes that need a live database."""
+    with open(VOLTA, encoding="utf-8-sig") as f:
+        asset = json.load(f)
+    data = bytes(asset[0]["Properties"]["Data"])
+    if not data.startswith(b"SQLite format 3\x00"):
+        print("FAIL: Volta.Data is not a SQLite file (starts %r)" % data[:16])
+        return 1
+    with open(path, "wb") as f:
+        f.write(data)
+    print("wrote %d bytes of SQLite to %s" % (len(data), path))
+    print("")
+    print("  cargo run --release -p coop-mem --example careerdiff_probe -- %s" % path)
+    return 0
+
+
 def parse_replicable():
     """`Table { name: "X", pk: "Y", team: "Z" }` entries from schema.rs."""
     with open(SCHEMA_RS, encoding="utf-8") as f:
@@ -167,6 +183,14 @@ def parse_scope_of():
 
 
 def main():
+    if "--volta" in sys.argv:
+        # `--volta <path>`: write the game's own database out, for `examples/careerdiff_probe.rs`.
+        at = sys.argv.index("--volta")
+        target = sys.argv[at + 1] if at + 1 < len(sys.argv) else "career.db"
+        if not os.path.exists(VOLTA):
+            skip("no Volta.json at %s (set COOP_DB_EXPORT)" % VOLTA)
+        return write_volta(target)
+
     if "--dump" in sys.argv:
         # `--dump <path>`: write the statements `sqlite3_exec` can see, for `examples/sqlcap_probe.rs`.
         at = sys.argv.index("--dump")

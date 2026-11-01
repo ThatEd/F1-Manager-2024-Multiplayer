@@ -1535,6 +1535,92 @@ should be made with the layer fix in §29.2, not before it. What is *not* accept
 arrangement, where the authorisation check cannot be reached for any real input: it reads as enforcement and is
 dead code, which is the fourth instance in this project of a mechanism that is present, tested and inert.
 
+## 30. The replacement producer, built and proven against the game's own schema
+
+§29.2 ended with three ways to fix the capture hook and declined to pick one, because two of them need the live
+process. The third does not: **read the tables and diff consecutive reads.** That is now built, and unlike everything
+in §22-§27 it is validated against the game's own data rather than against fixtures.
+
+### The cost model is what makes it viable, and it is measured
+
+The objection to a poller is that it copies the whole career every tick. For the tables that matter it does not:
+
+| | |
+|---|---|
+| replicable tables | 16 (single-column key + `TeamID`, §29.1) |
+| rows across all 16 | **70** |
+| largest tables | `Teams` 32, `Staff_NarrativeData` 13, `Teams_Colours` 13, `Parts_Designs` 12 |
+| bytes, fully framed for the wire format | **8 648** |
+| values sampled for type round-tripping | 696 |
+
+Measured by `tools/quote_probe.py` against `Volta`'s own seed data. A full pass every few seconds costs more in
+syscalls than in bytes, and a pass over an unchanged career produces **no output at all** - the diff is empty, so
+nothing goes on the wire. The tables that would have made this expensive are exactly the ones that are not
+replicable: `Staff_GameData` alone is 446 rows, and its tables are composite-key.
+
+### The mechanism, and the two bugs building it found
+
+`careerdiff` emits, per table:
+
+```sql
+SELECT
+  CASE WHEN typeof("TeamID")  = 'blob' THEN 'X_BLOB' ELSE hex(quote("TeamID"))  END,
+  CASE WHEN typeof("TeamName") = 'blob' THEN 'X_BLOB' ELSE hex(quote("TeamName")) END,
+  ...
+FROM "Teams" ORDER BY "TeamID";
+```
+
+Two decisions, each forced by a real failure:
+
+**`hex(quote(x))`, not `x`.** `LiveDb::parse_rows` splits columns on `\x1f` and rows on `\x1e`, and `quote()` does
+**not** escape those bytes - so a text value containing one would split a row and shift every following column. Team
+profile text and staff nicknames are free text, so this is reachable with real content. `hex()` renders to
+`[0-9A-F]` only, which cannot. And `quote()` rather than a raw cast because it preserves type: an integer `5` renders
+`5` and the text `'5'` renders `'5'`, and `sqlcap::parse_value` reads them back as different types. The pairing is
+tested in both directions, not assumed.
+
+**An explicit column list, never `*`.** The first version used `SELECT hex(quote(pk)), *`, which is wrong in a way
+that looks fine: `*` re-emits the key column *unencoded*, immediately after its encoded copy, so the raw `7` for an
+integer key reaches `decode_cell` with an odd number of characters and every row fails. Confirmed against real
+SQLite - the row comes back as `('37', 7, 'McLaren')`. The column list now comes from `pragma_table_info`, so a
+column added by a game patch appears without a code change.
+
+### What is proven, and how
+
+| claim | how it was proven |
+|---|---|
+| the generated SQL runs on all 16 tables of the real schema | `tools/quote_probe.py`, 12 assertions |
+| every stored value round-trips `hex(quote(x))` unchanged | 696 values sampled, types `integer`/`text`/`null`; **no BLOB in any replicable table** |
+| a full pass is cheap enough to repeat | 70 rows / 8 648 bytes, asserted under a 500-row ceiling |
+| the real Rust decoder reads the real database | `examples/careerdiff_probe.rs`: 16 tables, 70 rows, through `parse_rows` |
+| two identical passes send nothing | the probe asserts an empty diff on a re-read |
+| one edited column produces exactly one change | the probe edits `Teams.TeamName`, asserts 1 table / 1 change / 1 column |
+
+The wildcard bug was caught by planting it back in: the probe fails with *"row has 21 cells but 20 columns were asked
+for"*, which is the misalignment hazard, not a silent wrong write.
+
+### What it still cannot carry, and says so
+
+`Msg::Stmt` is `UPDATE ... WHERE <key> = <v>`. A row that the peer does not have - a new scout, a new design - would
+have the update match nothing and report success, which is indistinguishable from replication working. `TableDiff`
+therefore separates `changed` from `added`/`removed`, and `Pass::uncarriable` counts the latter so the caller reports
+**"N rows could not be carried"** instead of dropping them. That counter going non-zero is the evidence that
+`Msg::Stmt` needs an INSERT form; it is deliberately not guessed at here.
+
+### What is still missing, honestly
+
+* **Nothing calls it from the agent yet.** `coop-sql --diff-once` / `--diff-forever` are the manual entry points;
+  wiring it to the heartbeat and the outbox is the next step, and is mechanical rather than unknown.
+* **Attribution is fixed for diff-produced changes.** The diff reads every column, so it has the row's `TeamID`;
+  `to_changes` appends it to each change even though it did not move, and two tests prove `replicate::plan` then
+  accepts a change for a table whose key is not its team. The original §29.4 problem - the *statement* never sets
+  the team - is unchanged, which is why the hook-based producer still could not work.
+* **`LiveDb` transport is still untested.** The probes run against a SQLite file; the game's database is reached
+  through `sqlite3_exec` in-process. That is the remaining live unknown, and it is the same one §22 has carried
+  since it was written.
+
+---
+
 ### 29.5 What is still not proven, corrected
 
 | previously stated | now |
@@ -1563,9 +1649,9 @@ obvious choices are wrong so the next attempt does not repeat them.
 | finding | severity | state |
 |---|---|---|
 | **the replication allowlist was built from file names**: `StaffPS`, `PartsPS`, `TeamPS`, `CarPS`, `FinancesPS`, `ScoutingPS`, `SponsorshipPS` are `PSCollection` **statement catalogues**, not tables, so 7 of 8 entries could never match; `scope_of` classified 8 more names that do not exist | **critical** - the career layer could not replicate anything, and the refusal reason (`NoTeam`) was wrong for every input | **fixed** (§29.1): `coop-mem/src/schema.rs` derived from the game's own `Volta` database (`user_version` 336, 317 tables, decoded from a `SQLite format 3` byte array in the export); 16 tables qualify on a single-column key plus `TeamID`; `tools/schema_truth.py` re-derives the list and fails on any disagreement in either direction; `plan` and `stmtapply` both require the predicate to be the schema's key |
-| **the producer watches the wrong layer**: career writes use `sqlite3_prepare_v2` + bindings (133 call sites) and never reach `sqlite3_exec` (16 call sites), which the capture hook patches. Of the 67 statements that *do* reach `exec`, `sqlcap` parses **0** | **critical** - §23's "producer built and wired" was true of the plumbing and false of the input; the heartbeat would have read `fired xN writes=0` forever | **recorded, not fixable offline** (§29.2): the producer must move to the bind layer, a post-hoc DB diff, or the game's own statement layer. Measured reproducibly with the real parser via `tools/schema_truth.py --dump` + `examples/sqlcap_probe.rs`; no signature guessed |
+| **the producer watches the wrong layer**: career writes use `sqlite3_prepare_v2` + bindings (133 call sites) and never reach `sqlite3_exec` (16 call sites), which the capture hook patches. Of the 67 statements that *do* reach `exec`, `sqlcap` parses **0** | **critical** - §23's "producer built and wired" was true of the plumbing and false of the input; the heartbeat would have read `fired xN writes=0` forever | **replaced (§30)**: `careerdiff` needs no hook - it reads the 16 replicable tables (70 rows, 8 648 bytes, measured) and diffs consecutive passes. Proven against `Volta`'s own schema and seed data by `tools/quote_probe.py` (12 assertions) and `examples/careerdiff_probe.rs` (16 tables, 70 rows, stable on re-read, exactly one change after one edit). Wiring it to the agent heartbeat is the remaining mechanical step |
 | **an applied change was captured and replicated back**, so two agents would bounce one write between them forever | **high** - duplicate writes into a live career, with `SQL_SEQ` climbing on an idle player as the only symptom | **fixed** (§29.3): thread-local `without_capture` around the apply, restored by `Drop`; two tests, both proven by planting the regression - the second caught a panic-leak in my own fix |
-| **the team-authority check could never run**: `plan` derives the owning team from the columns being set, and of the 18 `UPDATE` statements against the 16 replicable tables, **none** set `TeamID` - so every attempt would have been refused as `NoTeam` even with a perfect hook | **high** - the authorisation rule reads as enforcement and is unreachable for every real input | **recorded** (§29.4): the team is a property of the row, not of the assignment list. The fix (read the row's `TeamID`, use the schema where the key is the team, or put the team on the wire) changes what `Msg::Stmt` means and should be chosen with the layer fix, not before it |
+| **the team-authority check could never run**: `plan` derives the owning team from the columns being set, and of the 18 `UPDATE` statements against the 16 replicable tables, **none** set `TeamID` - so every attempt would have been refused as `NoTeam` even with a perfect hook | **high** - the authorisation rule reads as enforcement and is unreachable for every real input | **fixed for the diff producer (§30)**: `to_changes` appends the row's own team to each change even though it did not move, so `plan` accepts it unweakened; two tests, both proven by planting the regression. Still unfixable for the hook-based producer, which is one more reason it is the wrong layer |
 | a lost clock frame desynced the pause state permanently, because nothing re-published it | **high** | **fixed**: the agent heartbeat re-publishes while paused; guarded by an 18-assertion suite || `coop-auth` is complete and never called, while comments claim it enforces team rules | **medium** - nothing broken today, but the guarantee was absent | **fixed**: gated at both write chokepoints (`LiveDb::sql`, `LiveDb::write_car`), with wiring tests |
 | **team retarget's "edit then reload" loses the edit**: `LoadGame` re-reads from disk, and nothing persists a runtime `UPDATE` | **high** - the recommended Versus implementation cannot work as written | recorded; the fix is a persistence step, and the first experiment is specified in §10 |
 | **the documented 30-name save-slot space is not the file space** (`save165`–`save168` and `customisation.sav` exist outside it) | **medium** - a co-op session named with an invented `slotName` may never be loadable | recorded in §11; the design should use an observed slot name |
