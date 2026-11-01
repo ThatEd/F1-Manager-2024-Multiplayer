@@ -24,6 +24,7 @@ pub mod params;
 pub mod statements;
 pub mod retarget;
 pub mod sqlcap;
+pub mod replicate;
 pub mod stmtapply;
 
 

@@ -6,6 +6,7 @@ version = 3
 name = "coop-agent"
 version = "0.1.0"
 dependencies = [
+ "coop-auth",
  "coop-mem",
  "coop-proto",
  "coop-supervisor",

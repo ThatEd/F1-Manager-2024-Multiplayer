@@ -1194,6 +1194,71 @@ and always exits 0 - the default still exits 1, because for a human "not ready" 
 
 ---
 
+## 27. Replication, actually built — and the sink that was never registered
+
+§23 built the capture hook and called it report-only. This makes it replication, and finding why required
+following the path rather than reading it.
+
+### The defect: the capture fired and threw everything away
+
+`sqlhook` was installed, its callback registered, and `classify` was never reached outside its own unit tests -
+because `set_sink` was called **only from tests**. The hook fired on every `sqlite3_exec` and dropped the text. Every
+piece worked; the chain was not connected at either end.
+
+This is the third instance of the same failure in this project (`coop-auth` complete and uncalled, the auth gate
+documented and unenforced, now this), so the fix is structural as well as literal:
+
+* `hook::install_exec` and `sqlhook::set_sink` are now registered **in the same block**, with a comment saying why
+  they must not be separated.
+* A test asserts the **whole chain** against the source - install → callback → sink → classify → plan → queue →
+  `Msg::Stmt` inbound → `stmtapply` - because a missing link is invisible at runtime when every individual piece
+  works. Verified by deleting the sink registration: the test fails naming that exact link.
+
+### The producer
+
+`on_sql_sink` classifies each statement, asks `coop_mem::replicate::plan` whether it may go out, encodes a
+`Msg::Stmt` and queues it. Sequence numbers are per-process and monotonic, so a gap at the far end means a lost
+frame rather than a skipped write.
+
+The heartbeat now reports **four** numbers instead of two, because they answer different questions and were
+previously indistinguishable:
+
+```
+sql capture fired xN (total …) writes=W replicated=R refused=F unsupported=U
+```
+
+`writes=0` means the hook is not seeing the game's SQL. `writes>0, replicated=0` means every one was refused and the
+log says why. `replicated>0, applied=0` means the transport is the problem. Previously "hook never fired" and "hook
+fired and saw no writes" read the same.
+
+### The policy
+
+`coop_mem::replicate::plan` is the decision, kept pure so every branch is testable against a fake player and mode:
+
+| condition | outcome | why |
+|---|---|---|
+| no `coop_mode.txt`/`coop_player.txt` | refuse (`NotConfigured`) | single-player maintenance must put nothing on the wire |
+| an `INSERT` | refuse (`NoKey`) | its key is not in the statement text; guessing would be a gamble on a database we only observe |
+| no `TeamID`-shaped column | refuse (`NoTeam`) | cannot attribute the row, and `coop-auth` refuses unattributable rows by design |
+| another team's row | refuse (`Denied`) | the mode rules |
+| a table outside the allowlist | refuse (`UnknownTable`) | an **allowlist**, not a denylist: a table added by a patch is simply not replicated, which costs a feature rather than a career |
+
+### The consumer
+
+An incoming `Msg::Stmt` goes through `stmtapply::to_update` - the applier proven against real SQLite in §22 - which
+allowlists identifiers, renders values as typed literals, and takes the predicate column locally. **The peer's values
+never become SQL syntax.** If no database attaches, the change is reported refused rather than dropped, because the
+two look identical from the far end.
+
+### What is still not proven
+
+Whether the game's actual `UPDATE` shapes match what `sqlcap` parses. The parser refuses anything it does not
+recognise and logs the text, so the first session where a player signs someone will say exactly how far it got -
+`writes=1 refused=1` with the reason, or `replicated=1` followed by the far machine applying it. That is a
+measurement, not an assumption, and it is the next thing the game can tell us that the repository cannot.
+
+---
+
 ## Summary of what this audit changed
 
 | finding | severity | state |
@@ -1210,7 +1275,7 @@ and always exits 0 - the default still exits 1, because for a human "not ready" 
 | **the resync path never resynced**: `split_frame` returned an empty frame that `drain(..0)` removed nothing of | medium - a corrupt header poisoned the stream forever; with the length cap it would have become a hot loop | **fixed**: `split_frame` returns `Result`, the reader clears and reports the drop |
 | a live-server test had a fixed 12 s deadline that starved under load | low - but a red result that may be noise trains people to ignore red | **fixed**: 60 s, overridable, fails fast if the server exits, and prints its output |
 | **`coop-link` wrote received saves to a hardcoded `SaveGames`**, while the game keeps one folder per profile | **high on another machine** - the transfer reports success and the save lands where the game never looks | **fixed**: picks the folder whose newest `.sav` is newest; tested on a synthetic layout and against the real one |
-| **the career layer is designed and not built**: nothing on the wire carries management state, so both players edit one DB and only the host's edits survive a save | **critical for the stated goal** - "a full career together" is not achievable as built, and Versus advertises a garage it cannot provide | **transport, applier and producer now exist (§22, §23)**: `Msg::Stmt` carries a typed row change, `stmtapply` applies it as one bounded `UPDATE` (proven against real SQLite), and a second hook on `sqlite3_exec` captures the game's own statements. It reports rather than replicates, because the row->team mapping does not exist yet |
+| **the career layer is designed and not built**: nothing on the wire carries management state, so both players edit one DB and only the host's edits survive a save | **critical for the stated goal** - "a full career together" is not achievable as built, and Versus advertises a garage it cannot provide | **built (§22, §23, §27)**: `Msg::Stmt` carries a typed row change, `stmtapply` applies it as one bounded `UPDATE` (proven against real SQLite), the hook captures the game's statements, a policy decides what may replicate, and the receiving side applies it. Whether the game's real SQL matches the parser is the one thing left, and the log reports it either way |
 | **~200 MiB/s is copied out of the game per snapshot** to build a 2.4 KiB frame (10.07 MiB read at 20 Hz) | medium - works, but the cost model was never checked, and a live test would blame the network | **fixed**: `read_cars_sparse` reads ~83 KiB per snapshot for identical output, behind `--sparse` |
 | `FRAME_GAP` was a 25 ms "rate limiter" that nothing read | low - a name that implies back-pressure that does not exist | **fixed**: removed, with the reason recorded where it lived |
 | **incidents and faults are not replicated at all**: the wire carries car *positions*, so each sim rolls its own dice and the two races contain different events | **critical for "watch the same race"** - the most user-visible failure left | **open** (§24): `RNG-DETERMINISM.md` §5.2 specifies the replay format and nothing implements it. Blocked on locating the roll site, which is `unknown` and needs the live process |

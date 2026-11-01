@@ -290,31 +290,37 @@ mod tests {
         assert!(sink().is_none(), "a cleared sink must not be called");
     }
 
-    /// The capture must be *wired*, not merely implemented.
+    /// The capture must be *wired end to end*, not merely installed.
     ///
-    /// This exact defect happened once already in this project: `coop-auth` was complete, tested, and called by
-    /// nothing, so a documented guarantee was never enforced. A capture hook that is installed but whose sink is
-    /// never registered would look identical from the outside - the hook fires, nothing is reported - so the
-    /// wiring is asserted against the source rather than assumed.
+    /// This exact defect has now happened three times in this project: `coop-auth` was complete and called by
+    /// nothing, the auth gate was documented and unenforced, and the SQL capture hook was installed with a callback
+    /// but **no sink registered** - so it fired on every `sqlite3_exec` and discarded the text. `classify` was never
+    /// reached outside its own unit tests.
+    ///
+    /// So the whole chain is asserted against the source: install, callback, sink, classify, plan, and queue. A
+    /// missing link in that chain is invisible at runtime because every individual piece works.
     #[test]
-    fn the_agent_registers_the_sql_sink_and_hook() {
+    fn the_capture_chain_is_wired_from_hook_to_outbox() {
         let src = include_str!("lib.rs");
+        let chain = [
+            ("hook::install_exec(base)", "installs the sqlite3_exec hook"),
+            ("hook::set_exec_callback(Some(on_sql_cb))", "registers the stub callback"),
+            ("sqlhook::set_sink(Some(on_sql_sink))", "registers the sink that receives the text"),
+            ("sqlcap::classify", "classifies the statement"),
+            ("replicate::plan", "decides whether it may be replicated"),
+            ("queue_frame(", "puts the frame on the outbox for the heartbeat to send"),
+        ];
+        for (needle, what) in chain {
+            assert!(src.contains(needle), "the capture chain is broken: nothing {what} ({needle})");
+        }
+        // And the inbound half, or replication is send-only.
         assert!(
-            src.contains("hook::install_exec(base)"),
-            "the agent must install the sqlite3_exec hook; without it nothing observes career writes"
+            src.contains("Msg::Stmt { seq, table, pk, set }"),
+            "the agent must handle an incoming Msg::Stmt, or changes are never applied"
         );
         assert!(
-            src.contains("hook::set_exec_callback(Some(on_sql_cb))"),
-            "installing the hook without registering its callback leaves it inert"
-        );
-        assert!(
-            src.contains("sqlhook::on_exec"),
-            "the callback must reach the capture, or the hook fires and reports nothing"
-        );
-        // And the report must be reachable from the log, or the first live session teaches us nothing.
-        assert!(
-            src.contains("sql_capture_stats()"),
-            "the fire/write counts must be reported, so 'no writes' and 'hook never fired' are distinguishable"
+            src.contains("stmtapply::to_update"),
+            "an incoming change must go through the safe applier, not composed SQL"
         );
     }
 }

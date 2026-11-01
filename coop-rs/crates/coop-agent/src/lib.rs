@@ -226,6 +226,19 @@ fn describe_inbound(frame: &[u8]) -> String {
                 format!("the other player took team {team}")
             }
         }
+        Ok(Msg::Stmt { seq, table, pk, set }) => {
+            let table = String::from_utf8_lossy(&table).to_string();
+            match apply_remote_stmt(&table, pk, &set) {
+                Ok(applied) => {
+                    STMT_APPLIED.fetch_add(1, Ordering::Relaxed);
+                    format!("replicated #{seq}: {table} {} -> {applied}", pk)
+                }
+                Err(why) => {
+                    STMT_REFUSED_IN.fetch_add(1, Ordering::Relaxed);
+                    format!("could not apply replicated #{seq} {table} {pk}: {why}")
+                }
+            }
+        }
         Ok(other) => format!("{other:?}"),
         // A version mismatch is the single most likely reason a co-op session fails to start after an
         // update, and it used to be reported as "unreadable frame" - the same line a random corrupt packet
@@ -621,16 +634,157 @@ fn drain_inbound(stream: &mut TcpStream, buf: &mut Vec<u8>) -> bool {
 const SQL_SAMPLE: u32 = 40;
 static SQL_WRITES: AtomicU64 = AtomicU64::new(0);
 static SQL_UNSUPPORTED: AtomicU64 = AtomicU64::new(0);
+static SQL_REPLICATED: AtomicU64 = AtomicU64::new(0);
+static SQL_REFUSED: AtomicU64 = AtomicU64::new(0);
+/// Monotonic per process, so a gap at the far end means a lost frame rather than a skipped write.
+static SQL_SEQ: AtomicU64 = AtomicU64::new(1);
 
-/// `(writes seen, unsupported statements seen)` for the heartbeat line.
+/// `(captured writes, replicated, refused, unsupported)` for the heartbeat line.
 ///
-/// Reported next to the hook's fire count on purpose: "the hook fired 3,000 times and saw no writes" and "the hook
-/// never fired" look identical from the outside otherwise, and they mean opposite things.
-pub fn sql_capture_stats() -> (u64, u64) {
+/// All four, because they answer different questions and were previously indistinguishable: "no writes captured"
+/// means the hook is not seeing the game's SQL at all; "captured but none replicated" means every one was refused
+/// and the log says why; "replicated but nothing applied" means the transport is the problem.
+pub fn sql_capture_stats() -> (u64, u64, u64, u64) {
     (
         SQL_WRITES.load(Ordering::Relaxed),
+        SQL_REPLICATED.load(Ordering::Relaxed),
+        SQL_REFUSED.load(Ordering::Relaxed),
         SQL_UNSUPPORTED.load(Ordering::Relaxed),
     )
+}
+
+/// Receives every captured statement: classifies it, decides whether it may be replicated, and queues the frame.
+///
+/// This is the missing producer. Before it was registered, `sqlhook` fired on every `sqlite3_exec` call and
+/// discarded the text, so `classify` was never reached outside its own unit tests - the capture hook was installed,
+/// wired, exercised by tests, and did nothing.
+///
+/// Kept cheap and total: it runs inside the game's own `sqlite3_exec`, so no panics outward and no unbounded work.
+/// Logging is on a fixed budget per category.
+fn on_sql_sink(sql: Option<&str>) {
+    let Some(text) = sql else { return };
+    match coop_mem::sqlcap::classify(text) {
+        coop_mem::sqlcap::Kind::Read => {}
+        coop_mem::sqlcap::Kind::Unsupported(t) => {
+            let n = SQL_UNSUPPORTED.fetch_add(1, Ordering::Relaxed);
+            if n < SQL_SAMPLE as u64 {
+                log(&format!("sql: not understood [{}] {}", n, t.chars().take(200).collect::<String>()));
+            }
+        }
+        coop_mem::sqlcap::Kind::Write(c) => {
+            SQL_WRITES.fetch_add(1, Ordering::Relaxed);
+            match coop_mem::replicate::plan(&c, coop_auth::configured()) {
+                Ok(planned) => match stmt_frame(&planned) {
+                    Ok(frame) => {
+                        let seq = SQL_SEQ.fetch_add(1, Ordering::Relaxed);
+                        let kept = queue_frame(frame);
+                        let n = SQL_REPLICATED.fetch_add(1, Ordering::Relaxed) + 1;
+                        if n <= SQL_SAMPLE as u64 || !kept {
+                            log(&format!(
+                                "sql: replicated #{n} seq {seq} {} where {}={} ({} queued{})",
+                                planned.table,
+                                planned.key_column,
+                                planned.key_value.as_text(),
+                                outbox_len(),
+                                if kept { "" } else { ", an older frame was dropped" }
+                            ));
+                        }
+                    }
+                    Err(e) => {
+                        let n = SQL_REFUSED.fetch_add(1, Ordering::Relaxed) + 1;
+                        if n <= SQL_SAMPLE as u64 {
+                            log(&format!("sql: not replicated #{n} {} ({e})", c.table));
+                        }
+                    }
+                },
+                Err(refused) => {
+                    let n = SQL_REFUSED.fetch_add(1, Ordering::Relaxed) + 1;
+                    if n <= SQL_SAMPLE as u64 {
+                        log(&format!("sql: not replicated #{n} {}: {}", c.table, refused.reason()));
+                    }
+                }
+            }
+        }
+    }
+}
+
+/// Encodes a planned change as `Msg::Stmt`.
+///
+/// The type mapping is why `Msg::Stmt` carries typed values: `sqlcap` decoded the literal, and this re-types it for
+/// the wire so the receiver binds the SQL type the sender meant. Formatting everything to text would turn an
+/// integer id into a string and then fail to turn it back.
+fn stmt_frame(p: &coop_mem::replicate::Planned) -> Result<Vec<u8>, String> {
+    let val = |v: &coop_mem::sqlcap::Value| -> coop_proto::StmtValue {
+        match v {
+            coop_mem::sqlcap::Value::Null => coop_proto::StmtValue::Null,
+            coop_mem::sqlcap::Value::Int(i) => coop_proto::StmtValue::Int(*i),
+            coop_mem::sqlcap::Value::Real(r) => coop_proto::StmtValue::Real(*r),
+            coop_mem::sqlcap::Value::Text(t) => coop_proto::StmtValue::Text(t.clone().into_bytes()),
+        }
+    };
+    // `Msg::Stmt` keys by i64. A non-integer key is refused here rather than truncated - `rg`ing the checks is
+    // cheaper than a wrong row in someone's career.
+    let pk = match &p.key_value {
+        coop_mem::sqlcap::Value::Int(i) => *i,
+        other => {
+            return Err(format!(
+                "row key {}({}) is not an integer and Msg::Stmt keys by i64",
+                p.key_column,
+                other.as_text()
+            ))
+        }
+    };
+    let seq = SQL_SEQ.load(Ordering::Relaxed) as u32;
+    Ok(encode(&Msg::Stmt {
+        seq,
+        table: p.table.clone().into_bytes(),
+        pk,
+        set: p.set.iter().map(|(c, v)| (c.clone().into_bytes(), val(v))).collect(),
+    }))
+}
+
+static STMT_APPLIED: AtomicU64 = AtomicU64::new(0);
+static STMT_REFUSED_IN: AtomicU64 = AtomicU64::new(0);
+
+/// `(replicated changes applied, incoming changes refused)` for the heartbeat.
+pub fn stmt_apply_stats() -> (u64, u64) {
+    (STMT_APPLIED.load(Ordering::Relaxed), STMT_REFUSED_IN.load(Ordering::Relaxed))
+}
+
+/// Applies a statement the other player replicated, through the safe applier.
+///
+/// Two things this deliberately does *not* do:
+///
+/// * **It does not compose SQL from the peer's values.** `stmtapply::to_update` allowlists identifiers and renders
+///   values as typed literals, so a hostile or buggy peer cannot make `DROP TABLE` execute. The predicate column is
+///   chosen locally, from the row key, so the peer cannot pick it either.
+/// * **It does not run without a live database.** If `LiveDb` cannot attach, the change is reported as refused
+///   rather than silently dropped - the two look identical from the far end otherwise.
+///
+/// Runs on the inbound path (a worker thread), not the game thread: SQLite serialises its own access, and the
+/// alternative - staging this into the sim mailbox - would tie career edits to a race being in progress.
+fn apply_remote_stmt(table: &str, pk: i64, set: &[(Vec<u8>, coop_proto::StmtValue)]) -> Result<String, String> {
+    // Build the same `Msg::Stmt` the applier expects, so there is one code path rather than two.
+    let msg = Msg::Stmt {
+        seq: 0,
+        table: table.as_bytes().to_vec(),
+        pk,
+        set: set.to_vec(),
+    };
+    // The peer's key column is not on the wire (it is implied by the row), so it is looked up locally. `ID` is the
+    // conventional name in this schema and the catalogue's statements key on `<Table>ID`; using the table name is
+    // the closest thing to a rule the schema actually has.
+    let pk_column = format!("{table}ID");
+    let update = coop_mem::stmtapply::to_update(&msg, &pk_column)
+        .map_err(|r| r.message())?;
+
+    // Attached per call rather than cached: `LiveDb` holds raw handles in `Cell`s and so is not `Sync`, and making
+    // it so to save an attach on a rare event would change a type the whole write path depends on. Attaching costs
+    // a `OpenProcess` plus a symbol scan, and a career change happens at human speed.
+    let db = coop_mem::livedb::LiveDb::attach(std::process::id())
+        .map_err(|e| format!("no live database attached (start a career first): {e}"))?;
+    db.sql(&update.sql).map_err(|e| format!("sqlite refused it: {e}"))?;
+    Ok(format!("{} column(s)", update.sql.matches('=').count().saturating_sub(1).max(1)))
 }
 
 /// The hook callback for `sqlite3_exec`: runs on the game thread, inside SQLite's entry point.
@@ -1912,10 +2066,17 @@ pub fn run(pid: u32, supervisor: &str) {
                             match hook::install_exec(base) {
                                 Ok(et) => {
                                     hook::set_exec_callback(Some(on_sql_cb));
+                                    // The sink is what actually receives the text. The *callback* only copies RDX
+                                    // and hands the pointer here; without this registration the hook installs,
+                                    // fires, and drops every statement - which is exactly the module-complete-but-
+                                    // uncalled defect this project has now hit three times (`coop-auth`, the auth
+                                    // gate wiring, and here). Setting it in the same breath as the callback is
+                                    // what makes that impossible to repeat silently.
+                                    crate::sqlhook::set_sink(Some(on_sql_sink));
                                     let eb = hook::exec_block().unwrap_or(0);
                                     log(&format!(
                                         "sql capture installed at 0x{et:X}; block 0x{eb:X}; \
-                                         fires live at 0x{:X}",
+                                         fires live at 0x{:X}; sink registered",
                                         eb + hook::FIRES_OFF
                                     ));
                                 }
@@ -1996,10 +2157,13 @@ pub fn run(pid: u32, supervisor: &str) {
             // they mean opposite things - so both the fire count and what was seen in it are printed.
             let efires = hook::exec_fires();
             if efires != last_exec_fires {
-                let (w, u) = sql_capture_stats();
+                let (writes, replicated, refused, unsupported) = sql_capture_stats();
                 last_exec_fires = efires;
-                log(&format!("sql capture fired x{} (total {efires}) writes={w} unsupported={u}",
-                    efires - last_exec_fires_reported));
+                log(&format!(
+                    "sql capture fired x{} (total {efires}) writes={writes} replicated={replicated} \
+                     refused={refused} unsupported={unsupported}",
+                    efires - last_exec_fires_reported
+                ));
                 last_exec_fires_reported = efires;
             } else if hook::exec_block().is_some() && efires == 0 && ticks_without_fire == 90 {
                 log(
