@@ -640,6 +640,45 @@ static SQL_REFUSED: AtomicU64 = AtomicU64::new(0);
 /// Monotonic per process, so a gap at the far end means a lost frame rather than a skipped write.
 static SQL_SEQ: AtomicU64 = AtomicU64::new(1);
 
+/// Set while this agent is applying a peer's change, so the capture hook does not send it back.
+///
+/// Without this the replication loops, and it does so silently. `apply_remote_stmt` runs its `UPDATE` through the
+/// game's own `sqlite3_exec` - the same address the capture hook patched - so the hook sees "we wrote table X, row
+/// Y" and `plan` accepts it: the row's team is ours (we just applied it), the table is replicable, and a fresh
+/// sequence number is allocated. The frame goes back to the peer, whose agent applies it, whose hook captures it,
+/// and sends it back. Every lap is a duplicate write on a live career, and `SQL_SEQ` climbing on a player who is
+/// doing nothing is the only visible symptom.
+///
+/// A thread-local rather than a global because the apply path is the only writer and it runs on the inbound worker
+/// thread; a global flag would also suppress a genuine concurrent write from the game thread during the apply
+/// window, which is the opposite of what is wanted.
+thread_local! {
+    static APPLYING_REMOTE: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+/// Runs `f` with capture suppressed, so a statement this agent executes is not replicated back to its author.
+///
+/// Restores through `Drop` rather than by assignment after the call. The assignment version was written first and a
+/// test caught it: a panic inside the closure unwound straight past the restore, leaving the flag set on that thread
+/// for the rest of the session. The symptom would be a machine that silently stops replicating its own writes while
+/// the heartbeat still reports the hook installed and firing - the same "installed but useless" shape as the
+/// `set_sink` and `coop-auth` bugs.
+fn without_capture<T>(f: impl FnOnce() -> T) -> T {
+    struct Restore(bool);
+    impl Drop for Restore {
+        fn drop(&mut self) {
+            APPLYING_REMOTE.with(|c| c.set(self.0));
+        }
+    }
+    let _restore = Restore(APPLYING_REMOTE.with(|c| c.replace(true)));
+    f()
+}
+
+/// Is this thread inside [`without_capture`]? Read by the sink, which must stay allocation-free and non-blocking.
+fn capture_suppressed() -> bool {
+    APPLYING_REMOTE.with(|c| c.get())
+}
+
 /// `(captured writes, replicated, refused, unsupported)` for the heartbeat line.
 ///
 /// All four, because they answer different questions and were previously indistinguishable: "no writes captured"
@@ -663,6 +702,12 @@ pub fn sql_capture_stats() -> (u64, u64, u64, u64) {
 /// Kept cheap and total: it runs inside the game's own `sqlite3_exec`, so no panics outward and no unbounded work.
 /// Logging is on a fixed budget per category.
 fn on_sql_sink(sql: Option<&str>) {
+    // Our own applied writes come back through the hook we installed, and answering them would put the change on
+    // the wire again: apply, capture, replicate, apply, forever. Cheapest possible check so the game's own
+    // `sqlite3_exec` does no extra work on the fast path.
+    if capture_suppressed() {
+        return;
+    }
     let Some(text) = sql else { return };
     match coop_mem::sqlcap::classify(text) {
         coop_mem::sqlcap::Kind::Read => {}
@@ -676,8 +721,7 @@ fn on_sql_sink(sql: Option<&str>) {
             SQL_WRITES.fetch_add(1, Ordering::Relaxed);
             match coop_mem::replicate::plan(&c, coop_auth::configured()) {
                 Ok(planned) => match stmt_frame(&planned) {
-                    Ok(frame) => {
-                        let seq = SQL_SEQ.fetch_add(1, Ordering::Relaxed);
+                    Ok((seq, frame)) => {
                         let kept = queue_frame(frame);
                         let n = SQL_REPLICATED.fetch_add(1, Ordering::Relaxed) + 1;
                         if n <= SQL_SAMPLE as u64 || !kept {
@@ -714,7 +758,7 @@ fn on_sql_sink(sql: Option<&str>) {
 /// The type mapping is why `Msg::Stmt` carries typed values: `sqlcap` decoded the literal, and this re-types it for
 /// the wire so the receiver binds the SQL type the sender meant. Formatting everything to text would turn an
 /// integer id into a string and then fail to turn it back.
-fn stmt_frame(p: &coop_mem::replicate::Planned) -> Result<Vec<u8>, String> {
+fn stmt_frame(p: &coop_mem::replicate::Planned) -> Result<(u32, Vec<u8>), String> {
     let val = |v: &coop_mem::sqlcap::Value| -> coop_proto::StmtValue {
         match v {
             coop_mem::sqlcap::Value::Null => coop_proto::StmtValue::Null,
@@ -735,8 +779,12 @@ fn stmt_frame(p: &coop_mem::replicate::Planned) -> Result<Vec<u8>, String> {
             ))
         }
     };
-    let seq = SQL_SEQ.load(Ordering::Relaxed) as u32;
-    Ok(encode(&Msg::Stmt {
+    // Incremented *here*, not read. It used to `load`, while the caller did the `fetch_add` separately - so two
+    // changes queued in the same tick could pick up the same number, and then a gap (which is what the sequence
+    // exists to detect) would look like a duplicate instead. Duplicates are the worse failure: the receiver would
+    // apply the second change believing it had already seen it, or apply both under one identity.
+    let seq = SQL_SEQ.fetch_add(1, Ordering::Relaxed) as u32;
+    let frame = encode(&Msg::Stmt {
         seq,
         table: p.table.clone().into_bytes(),
         // The real key column, parsed from the statement's own `WHERE`. Dropping this was the bug: the receiver
@@ -745,7 +793,8 @@ fn stmt_frame(p: &coop_mem::replicate::Planned) -> Result<Vec<u8>, String> {
         pk_column: p.key_column.clone().into_bytes(),
         pk,
         set: p.set.iter().map(|(c, v)| (c.clone().into_bytes(), val(v))).collect(),
-    }))
+    });
+    Ok((seq, frame))
 }
 
 static STMT_APPLIED: AtomicU64 = AtomicU64::new(0);
@@ -787,9 +836,20 @@ fn apply_remote_stmt(table: &str, pk_column: &str, pk: i64,
     // Attached per call rather than cached: `LiveDb` holds raw handles in `Cell`s and so is not `Sync`, and making
     // it so to save an attach on a rare event would change a type the whole write path depends on. Attaching costs
     // a `OpenProcess` plus a symbol scan, and a career change happens at human speed.
+    //
+    // `std::process::id()` is deliberate: this runs inside the game, so "the target" *is* this process. Attaching
+    // to yourself is unusual but not a mistake - `LiveDb` reaches the database through `ReadProcessMemory`/
+    // `WriteProcessMemory` and a thread started at a stub address, and all three work against the calling process
+    // as well as another one. It is the same `LiveDb` the out-of-process tools use, so there is one write path
+    // rather than a second, in-process one that would only ever be exercised in co-op.
+    //
+    // The statement runs inside `without_capture`, because the game's `sqlite3_exec` is the address the capture
+    // hook patched: applying a peer's change makes the hook fire, and without suppression this agent would
+    // replicate that change straight back to the peer that sent it.
     let db = coop_mem::livedb::LiveDb::attach(std::process::id())
         .map_err(|e| format!("no live database attached (start a career first): {e}"))?;
-    db.sql(&update.sql).map_err(|e| format!("sqlite refused it: {e}"))?;
+    without_capture(|| db.sql(&update.sql))
+        .map_err(|e| format!("sqlite refused it: {e}"))?;
     Ok(format!("{} column(s)", update.sql.matches('=').count().saturating_sub(1).max(1)))
 }
 
@@ -2177,6 +2237,22 @@ pub fn run(pid: u32, supervisor: &str) {
                      sqlite3_exec yet. Load a career and make a management change to make it run.",
                 );
             }
+
+            // `fired` and `captured a write` are different facts, and the gap between them is the whole reason
+            // this line exists. Measured from the export: 361 of the catalogue's 428 write statements are
+            // parameterised, so their values travel in SQLite bindings and `sqlite3_exec` never sees them; the 67
+            // that do reach it are housekeeping (whole-table DELETEs, `SET x = x + 1`, `INSERT ... SELECT`) and
+            // `sqlcap` parses **none** of them. So a fire count climbing while `writes` stays at 0 is the expected
+            // reading, not a fault to wait out - and without saying so, "capture fired x400 writes=0" reads like a
+            // parser bug rather than a statement about which layer the game writes at.
+            if efires > 0 && SQL_WRITES.load(Ordering::Relaxed) == 0 && ticks_without_fire == 120 {
+                log(
+                    "sql capture is firing but has captured no write it can use. Expected on this build: \
+                     career writes go through sqlite3_prepare_v2 + bindings, which this hook cannot see, and \
+                     sqlcap recognises none of the statements that do reach sqlite3_exec. Career replication \
+                     cannot work from this hook - see docs/COOP-PAPER-AUDIT.md section 29.2.",
+                );
+            }
         }
         ticks_without_fire = ticks_without_fire.saturating_add(1);
 
@@ -2559,6 +2635,62 @@ mod tests {
     fn log_path_sits_next_to_the_exe() {
         let p = log_path();
         assert_eq!(p.file_name().unwrap(), "coop_agent.log");
+    }
+
+    /// Applying a peer's change must not be captured and sent back.
+    ///
+    /// This is the loop the guard exists to stop, and it is silent: `apply_remote_stmt` runs its `UPDATE` through
+    /// the game's own `sqlite3_exec`, which is the address the capture hook patched. The hook fires, `plan` would
+    /// accept the change - the row's team reads as ours because we just wrote it - and a fresh sequence number
+    /// would go out to the peer whose agent would apply it and send it back. Every lap is another real write into a
+    /// live career, and the only symptom is `SQL_SEQ` climbing on a player who is doing nothing.
+    ///
+    /// The observable is `SQL_WRITES`, the counter `on_sql_sink` increments for a write it accepted. Asserting on
+    /// the outbox would be stronger but not equivalent: `plan` needs `coop_mode.txt` beside the executable, which a
+    /// test process does not have, so every statement would be refused as `NotConfigured` and the outbox would stay
+    /// empty whether the guard existed or not - a test that passes for the wrong reason. Reaching `SQL_WRITES` at
+    /// all means the capture path ran, which is exactly the property under test.
+    #[test]
+    fn a_statement_this_agent_applies_is_not_replicated_back() {
+        // `UPDATE Teams`, with a team and a single-column key, is the shape `plan` accepts. Only the capture
+        // decision is under test, so the statement is real but nothing is sent: no supervisor is running.
+        const SQL: &str = "UPDATE Teams SET TeamPrincipalRating = 6 WHERE TeamID = 7";
+
+        let before = SQL_WRITES.load(Ordering::SeqCst);
+        on_sql_sink(Some(SQL));
+        let captured_directly = SQL_WRITES.load(Ordering::SeqCst);
+        assert_eq!(
+            captured_directly,
+            before + 1,
+            "the sink must count an ordinary write; without this the guard test proves nothing"
+        );
+
+        // Inside `without_capture` - which is what wraps the applied statement - nothing is counted.
+        without_capture(|| {
+            assert!(capture_suppressed(), "the guard must be visible to the sink");
+            on_sql_sink(Some(SQL));
+        });
+        assert_eq!(
+            SQL_WRITES.load(Ordering::SeqCst),
+            captured_directly,
+            "the applied change was captured and would have been replicated back to its author"
+        );
+        assert!(!capture_suppressed(), "the guard must be cleared afterwards");
+    }
+
+    /// The guard must not leak out of the closure when the closure fails or panics, or one bad apply would silence
+    /// replication for the rest of the session with the heartbeat still reporting the hook installed.
+    #[test]
+    fn the_capture_guard_is_restored_even_when_the_body_fails() {
+        assert!(!capture_suppressed());
+        let r: Result<(), String> = without_capture(|| Err("sqlite said no".to_string()));
+        assert!(r.is_err());
+        assert!(!capture_suppressed(), "a failed apply left capture suppressed");
+
+        // And a panic must not leak it either.
+        let panicked = std::panic::catch_unwind(|| without_capture(|| panic!("apply exploded")));
+        assert!(panicked.is_err());
+        assert!(!capture_suppressed(), "a panicking apply left capture suppressed");
     }
 
     #[test]

@@ -61,34 +61,48 @@ gpPrep           11
 
 ### The career database
 
-`Content/Database` holds the **schema**: **26 table definitions** (`*PS.json`, 276 KB total) plus
-**336 schema diffs** (`Volta_NNNN_to_NNNN.json`) — the schema has been migrated 336 times, which is
-a useful proxy for how much the career model has grown.
+`Content/Database` holds the **statement catalogue**: **26 `PSCollection` assets** (`*PS.json`, 276 KB
+total) plus **336 schema diffs** (`Volta_NNNN_to_NNNN.json`) — the schema has been migrated 336 times,
+which is a useful proxy for how much the career model has grown.
 
-| table | size | table | size |
-|---|---|---|---|
-| `StaffPS` | **63,396 B (23% of the schema)** | `ScoutingPS` | 11,667 B |
-| `SavePS` | 35,491 B | `RacesPS` | 9,651 B |
-| `PartsPS` | 35,003 B | `RegulationsPS` | 8,892 B |
-| `TeamsPS` | 20,900 B | `SponsorshipPS` | 7,392 B |
-| `MailPS` | 13,799 B | `PlayerPS` | 7,155 B |
-| `StandingsPS` | 12,798 B | `BoardPS` | 10,813 B |
+> **These files are not the schema, and they are not tables.** Each `*PS.json` is a `PSCollection`: a
+> catalogue of named prepared statements. `StaffPS.json` holds 179 entries whose `Key` is a name the game
+> calls (`AddStaffContract`) and whose `Value` is the SQL it runs
+> (`INSERT OR REPLACE INTO Staff_Contracts (...) VALUES (?1 … ?12)`). There is no `StaffPS` table. This
+> section previously read one file as one table, which is where the phantom names `StaffPS`, `PartsPS`,
+> `TeamsPS`, `SavePS` and the rest came from; they were carried into the replication allowlist and the
+> team-authority table list before audit §29.1 found it.
+
+| catalogue | size | statements | catalogue | size | statements |
+|---|---|---|---|---|---|
+| `StaffPS` | **63,396 B** | 179 | `ScoutingPS` | 11,667 B | — |
+| `SavePS` | 35,491 B | — | `RacesPS` | 9,651 B | — |
+| `PartsPS` | 35,003 B | — | `RegulationsPS` | 8,892 B | — |
+| `TeamsPS` | 20,900 B | — | `SponsorshipPS` | 7,392 B | — |
+| `MailPS` | 13,799 B | — | `PlayerPS` | 7,155 B | — |
+| `StandingsPS` | 12,798 B | — | `BoardPS` | 10,813 B | — |
 
 Also `BuildingsPS`, `CalendarPS`, `FinancesPS`, `FanfaresPS`, `OnboardingPS`, `SeasonsPS`,
 `SubTeamPS`, `EffectsPS`, `DifficultyPS`, `CountriesPS`, `MiscPS`, `NotificationsPS`,
-`PartsAutoPS`.
+`PartsAutoPS`. Together they hold **853 statements, 428 of which write** — 361 parameterised and 67
+exec-visible.
 
-**Note the shape:** `StaffPS` alone is 23% of the schema — nearly twice `PartsPS` and almost twice
-`SavePS`. The single largest data structure in the career model is *people*, not cars and not the
-sim. There is **no `RaceSim` table at all**; the only sim-adjacent table is `RacesPS` (9.6 KB,
-calendar entity). That is consistent with [RNG-DETERMINISM.md](RNG-DETERMINISM.md) §2: sim runtime
-state is not persisted, because it is not career state.
+**The real schema is `Volta.json`,** a `DatabaseAsset` whose `Data` property is a byte-for-byte SQLite
+3 file: `user_version` **336**, **317 tables**, 2 views, seeded with 32 `Teams`, 446 `Staff_GameData`,
+5 `Seasons`, 26 `Races_Tracks` and 1 `Player` row. `tools/schema_truth.py` decodes it, and
+`coop-rs/crates/coop-mem/src/schema.rs` is derived from it.
 
-**Careful — these 26 files are the schema, not the save.** The live career database is **in memory**,
-reached only through the game's own `sqlite3_exec` (RVA `0x156D300`, `sqlite3*` at
-`0x14156D300`/`0xF5754680` in the session recorded in [NOTES.md](../NOTES.md) ~line 1908), and the
-`.sav` file is opaque compressed data with no readable SQL inside it (~line 1656). "26 tables" is a
-statement about the game's data model, **not** about a file you can open.
+**Note the shape:** `StaffPS` alone is 23% of the catalogue — nearly twice `PartsPS` and almost twice
+`SavePS`. The single largest data model in the career is *people*, not cars and not the sim. There is
+no sim table in the career schema at all; the sim's own state lives in the `Save_*` tables, which
+exist only while a session is running.
+
+**Careful — the catalogue is not the save.** The live career database is **in memory**, reached only
+through the game's own SQL (prepare/bind at RVA `0x15116E0`, `sqlite3_exec` at `0x156D300`,
+`sqlite3*` at `0x14156D300`/`0xF5754680` in the session recorded in [NOTES.md](../NOTES.md) ~line 1908),
+and the `.sav` file is opaque compressed data with no readable SQL inside it (~line 1656). "26 catalogues"
+is a statement about the game's data model, **not** about a file you can open; for the tables themselves,
+count `Volta`'s 317.
 
 ---
 

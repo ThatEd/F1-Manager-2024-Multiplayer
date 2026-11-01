@@ -39,7 +39,7 @@ need different rules — §5.
 |---|---|---|---|---|
 | **L1 Race sim** | the race weekend | engine memory, unsaved | `ERaceSimEventType` + per-car fields | [RACESIM-HIJACK.md](RACESIM-HIJACK.md) strategies A/B/F |
 | **L2 UI** | Gameface web view, 1,448 JS files | DataStore, engine-owned | `engine.trigger` (352 events) | [UI-COMMANDS.md](UI-COMMANDS.md) — but see §2 |
-| **L3 Career model** | 26 tables | **in-memory SQLite** | game's own `sqlite3_exec` (RVA `0x156D300`) | replicated transaction log (§4) |
+| **L3 Career model** | 317 tables | **in-memory SQLite** | game's own SQL: `sqlite3_prepare_v2` (RVA `0x15116E0`) for 361 of 428 writes, `sqlite3_exec` (`0x156D300`) for 67 | replicated transaction log (§4) |
 | **L4 Front-end** | menus, CAS, save/load | DataStore + files | `LoadGame`, `ContinueGame`, CAS*, `QuitGame` | document swap (§3) |
 
 The layering is real, not a diagram convenience: the three `.html` entry points load disjoint
@@ -114,12 +114,18 @@ This is the 76%, and it is where the design effort belongs.
 
 ### 4.1 What the layer actually is
 
-- **Schema:** 26 tables in `Content/Database/*PS.json` (276 KB), plus **336** schema migrations.
-  Largest is `StaffPS` at 23% of the schema (people, not cars — see [GAME-SCOPE.md](GAME-SCOPE.md) §2).
+- **Schema:** **317 tables**, read from `Content/Database/Volta.json` — a `DatabaseAsset` whose payload is
+  a SQLite file (`SQLite format 3`, `user_version` 336, 2 views). The 26 `*PS.json` files beside it
+  (276 KB) are `PSCollection` **statement catalogues**, not tables; the largest, `StaffPS` at 23%, is 179
+  named statements aimed at `Staff_Contracts` (people, not cars — see [GAME-SCOPE.md](GAME-SCOPE.md) §2).
+  `coop-rs/crates/coop-mem/src/schema.rs` is derived from `Volta`; `tools/schema_truth.py` re-derives it.
 - **Live DB:** **in memory**, no file, no pager image that maps to it. Reachable **only** through the
-  game's own `sqlite3_exec` at RVA `0x156D300`, with the `sqlite3*` found by signature and validated
-  by `db+0x20 == db+0x2A0`, `*(i32*)(db+0x28) == 2`, and `pager->zName == ":memory:"`
-  ([NOTES.md](NOTES.md) ~1908).
+  game's own SQL. Of the 428 write statements in the catalogue, **361 are parameterised** and travel
+  through `sqlite3_prepare_v2` (RVA `0x15116E0`, 133 call sites) with bound values; only **67** are
+  literal and reach `sqlite3_exec` (RVA `0x156D300`, 16 call sites), with the `sqlite3*` found by
+  signature and validated by `db+0x20 == db+0x2A0`, `*(i32*)(db+0x28) == 2`, and `pager->zName == ":memory:"`
+  ([NOTES.md](NOTES.md) ~1908). **A capture hook on `exec` therefore cannot see a career change** — see
+  [COOP-PAPER-AUDIT.md](COOP-PAPER-AUDIT.md) §29.2.
 - **Proven capable of:** arbitrary `SELECT`, idempotent transactions, and real writes —
   `coop-sql --swap-contracts 8 83` produced a verifiable swap. A bad statement
   (`INSERT INTO Board_TeamRating` with an unknown `SeasonID`) returned **SQLite error 19 and the game
@@ -139,13 +145,13 @@ Four structural advantages, each traceable to a finding:
    (a contract, an upgrade, a hire) are data operations. `inferred`: so the same SQL on two machines
    produces the same state, which the sim never does.
 3. **State is addressable.** A race is a continuous trajectory you must sample at 43 Hz. A career is
-   26 tables you can key by primary key and diff by row.
+   317 tables; 58 of them have a single-column key. 77 have composite keys, so one-key replication cannot name
 4. **It fails safely.** The error-19 result shows a rejected statement does not corrupt the session —
    important when the writer is a network peer.
 
 ### 4.3 The mechanism: replicate transactions, not state
 
-**Do not ship table snapshots.** The DB is in-memory and large; `StaffPS` alone is 23% of the schema
+**Do not ship table snapshots.** The DB is in-memory and large; the `StaffPS` catalogue alone is 23% of the schema
 and a full career has thousands of rows. Ship the *statements*.
 
 ```
@@ -244,9 +250,9 @@ between sessions ([NOTES.md](NOTES.md) ~1513: "the live address **moves between 
 
 | career state | L2 UI event | L3 SQL | L4 document | tractability |
 |---|---|---|---|---|
-| calendar / career clock | `AdvanceToNextEvent`, `NextMonthSelected` | `CalendarPS` | — | **good** — single actor, one verb |
-| contracts, staff, scouting | `On*StaffContract`, `EditStaff*`, `OnSubmit*Scout` | `StaffPS`, `ScoutingPS` | — | **good** — row-scoped, idempotent-able |
-| parts, design, manufacture | `Parts*`, `DesignStageChanged`, `Warehouse*` | `PartsPS` | — | good |
+| calendar / career clock | `AdvanceToNextEvent`, `NextMonthSelected` | `Calendar_LastActivityDates`, `Races`, `Player_State` | — | **good** — single actor, one verb |
+| contracts, staff, scouting | `On*StaffContract`, `EditStaff*`, `OnSubmit*Scout` | `Staff_Contracts`, `Scouting_Staff_*`, `Staff_Team_CAS` | — | **mixed** — the `Scouting_Staff_*` and `Staff_Team_CAS` rows are single-key and replicateable; `Staff_Contracts` is keyed `(StaffID, ContractType, TeamID)` and needs a composite key on the wire |
+| parts, design, manufacture | `Parts*`, `DesignStageChanged`, `Warehouse*` | `Parts_Designs`, `Parts_Projects`, `Parts_Items` | — | **good** — `Parts_Designs` (key `DesignID`) replicates today; the `Parts_Designs_*` child rows are composite-key |
 | finances, sponsorship | `Sponsor*`, `Condition*`, `ConfirmSponsor*` | `FinancesPS`, `SponsorshipPS` | — | good |
 | board objectives | `EnterTeamChangeFlow`, fanfares | `BoardPS` | — | medium — mostly engine-computed |
 | mail / dilemmas | `MailOpen`, `MailRead`, `SetDilemmaResponse` | `MailPS` | — | medium — responses are choices, not data |
@@ -292,7 +298,7 @@ path, and fails safely — so it is both the bigger job and the cheaper one.
 2. **DB handle stability across a race `unknown`** (§5.3) — highest-value open question.
 3. **Whether any career event is honoured engine-side from a non-owner** `unknown`; assume no (§2).
 4. **Schema-vs-runtime drift `unknown`.** The 26 `*PS.json` files are schema definitions; whether the
-   live DB exactly matches (26 tables, same columns) is not established. The 336 migrations make
+   live DB exactly matches (317 tables, same columns) is not established. The 336 migrations make
    drift plausible.
 5. **No live tests.** Nothing in this document was executed. Every mechanism here is argued from
    evidence already recorded in [NOTES.md](NOTES.md), not re-measured.
@@ -306,7 +312,7 @@ path, and fails safely — so it is both the bigger job and the cheaper one.
 raceWeekend UI        346 / 1448 JS files        = 23.9%
 raceWeekend events     85 / 352  engine events   = 24.1%
 sim families          241 vs career 873 binary identifiers  = 3.6x smaller
-career schema          26 tables, StaffPS 23% of them; sim has no table
+career schema          317 tables in Volta; 26 PSCollection catalogues; sim has no table
 ```
 
 Full working in [GAME-SCOPE.md](GAME-SCOPE.md) §1, all 24 figures machine-verified.

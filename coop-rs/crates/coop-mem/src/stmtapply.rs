@@ -23,6 +23,12 @@
 //! * **Only `UPDATE ... WHERE <pk column> = <int>` is produced.** Never `DELETE`, never `INSERT`, never a bare
 //!   statement, so the worst a malformed message can do is fail.
 //!
+//! One more check, added after the table list was found to be built from asset names rather than from the schema:
+//! **the predicate column must be the one the local schema declares as that table's key.** `to_update` used to take
+//! whatever `pk_column` the caller passed. The caller now takes it from the peer's own statement, so a peer could
+//! name `TeamID` for a table whose key is `DesignID` and the local `UPDATE` would match every row of a team instead
+//! of one row. Checking it here means the peer chooses neither the value's meaning nor the predicate.
+//!
 //! This is deliberately conservative: a replicated change is either a well-formed single-row update or it is
 //! refused with a reason. `escape` and `ident_ok` are unit-tested against the obvious attacks rather than trusted.
 
@@ -44,6 +50,10 @@ pub enum Refused {
     NoAssignments,
     /// The message was not a `Stmt`.
     NotAStmt,
+    /// The predicate column is not the key the local schema declares for that table.
+    WrongPredicate { table: String, found: String, expected: &'static str },
+    /// The table is not one this build replicates at all.
+    UnknownTable(String),
 }
 
 impl Refused {
@@ -54,6 +64,11 @@ impl Refused {
             ),
             Refused::NoAssignments => "refused a statement with no assignments".to_string(),
             Refused::NotAStmt => "not a career statement".to_string(),
+            Refused::WrongPredicate { table, found, expected } => format!(
+                "refused {table} selected on {found}: the local schema keys it by {expected}, and a predicate the \
+                 peer chooses would let one message match many rows"
+            ),
+            Refused::UnknownTable(t) => format!("refused {t}: not a table this build replicates"),
         }
     }
 }
@@ -128,6 +143,18 @@ pub fn to_update(msg: &Msg, pk_column: &str) -> Result<Update, Refused> {
     if !ident_ok(pk_column) {
         return Err(Refused::BadIdentifier(pk_column.to_string()));
     }
+    // The predicate must be the key the local schema declares, not whatever the peer's statement selected on. The
+    // sending side refuses a statement whose predicate is not its own table's key, but a hostile or older peer can
+    // still send one, and `WHERE TeamID = 7` on a 26-car grid would rewrite every row belonging to that team.
+    let schema = crate::schema::lookup(&table_name)
+        .ok_or_else(|| Refused::UnknownTable(table_name.clone()))?;
+    if !pk_column.eq_ignore_ascii_case(schema.pk) {
+        return Err(Refused::WrongPredicate {
+            table: schema.name.to_string(),
+            found: pk_column.to_string(),
+            expected: schema.pk,
+        });
+    }
 
     let mut sql = format!("UPDATE {table_name} SET ");
     for (i, (col, val)) in set.iter().enumerate() {
@@ -160,7 +187,7 @@ mod tests {
         Msg::Stmt {
             seq: 1,
             table: table.as_bytes().to_vec(),
-            pk_column: b"PlayerID".to_vec(),
+            pk_column: b"TeamID".to_vec(),
             pk: 99,
             set: cols
                 .iter()
@@ -171,29 +198,57 @@ mod tests {
 
     #[test]
     fn a_normal_change_becomes_one_bounded_update() {
+        // `Teams` is keyed `TeamID INTEGER PRIMARY KEY AUTOINCREMENT`, so it is a real table with a single-column
+        // key - which is what `Msg::Stmt` can carry. `Player` is keyed `(FirstName, LastName)` and cannot be.
         let m = stmt(
-            "Player",
-            &[("TeamID", StmtValue::Int(7)), ("Notes", StmtValue::Null)],
+            "Teams",
+            &[("PredictedRanking", StmtValue::Int(7)), ("ProfileText", StmtValue::Null)],
         );
-        let u = to_update(&m, "PlayerID").unwrap();
-        assert_eq!(u.sql, "UPDATE Player SET TeamID = 7, Notes = NULL WHERE PlayerID = 99;");
-        assert_eq!(u.table, "Player");
+        let u = to_update(&m, "TeamID").unwrap();
+        assert_eq!(u.sql, "UPDATE Teams SET PredictedRanking = 7, ProfileText = NULL WHERE TeamID = 99;");
+        assert_eq!(u.table, "Teams");
         assert_eq!(u.pk, 99);
+    }
+
+    #[test]
+    fn a_table_outside_the_schema_is_refused_even_with_a_clean_name() {
+        // `Player` passes the identifier check and is a real table, but it is not replication-eligible: it is keyed
+        // by two columns. The applier must not be the weak half of that decision.
+        let m = stmt("Player", &[("TeamID", StmtValue::Int(7))]);
+        assert_eq!(
+            to_update(&m, "TeamID"),
+            Err(Refused::UnknownTable("Player".to_string()))
+        );
+    }
+
+    #[test]
+    fn a_predicate_the_peer_chooses_is_refused_when_it_is_not_the_local_key() {
+        // The concrete danger: `Teams` is keyed by `TeamID`, and a peer sending `pk_column = "Formula"` would have
+        // the local UPDATE match every team in Formula 2 rather than one row.
+        let m = stmt("Teams", &[("PredictedRanking", StmtValue::Int(1))]);
+        match to_update(&m, "Formula") {
+            Err(Refused::WrongPredicate { table, found, expected }) => {
+                assert_eq!(table, "Teams");
+                assert_eq!(found, "Formula");
+                assert_eq!(expected, "TeamID");
+            }
+            other => panic!("expected WrongPredicate, got {other:?}"),
+        }
     }
 
     #[test]
     fn a_hostile_table_name_is_refused() {
         // The attack this exists to stop: a peer naming a "table" that terminates the statement.
         for bad in [
-            "Player; DROP TABLE Player; --",
-            "Player'",
-            "Player--",
-            "Player WHERE 1=1",
-            "../Player",
+            "Teams; DROP TABLE Teams; --",
+            "Teams'",
+            "Teams--",
+            "Teams WHERE 1=1",
+            "../Teams",
             "",
         ] {
             let m = stmt(bad, &[("TeamID", StmtValue::Int(7))]);
-            match to_update(&m, "PlayerID") {
+            match to_update(&m, "TeamID") {
                 Err(Refused::BadIdentifier(_)) => {}
                 other => panic!("{bad:?} must be refused, got {other:?}"),
             }
@@ -202,29 +257,29 @@ mod tests {
 
     #[test]
     fn a_hostile_column_name_is_refused() {
-        let m = stmt("Player", &[("TeamID = 1 WHERE 1=1 --", StmtValue::Int(7))]);
-        assert!(matches!(to_update(&m, "PlayerID"), Err(Refused::BadIdentifier(_))));
+        let m = stmt("Teams", &[("TeamID = 1 WHERE 1=1 --", StmtValue::Int(7))]);
+        assert!(matches!(to_update(&m, "TeamID"), Err(Refused::BadIdentifier(_))));
     }
 
     #[test]
     fn a_hostile_value_stays_a_value() {
         let m = stmt(
-            "Player",
+            "Teams",
             &[(
-                "Notes",
-                StmtValue::Text(b"7'); DROP TABLE Player; --".to_vec()),
+                "ProfileText",
+                StmtValue::Text(b"7'); DROP TABLE Teams; --".to_vec()),
             )],
         );
-        let u = to_update(&m, "PlayerID").unwrap();
+        let u = to_update(&m, "TeamID").unwrap();
         // The whole payload is inside one quoted literal, with its own quote doubled.
         assert_eq!(
             u.sql,
-            "UPDATE Player SET Notes = '7''); DROP TABLE Player; --' WHERE PlayerID = 99;"
+            "UPDATE Teams SET ProfileText = '7''); DROP TABLE Teams; --' WHERE TeamID = 99;"
         );
         // Exactly one *statement*: the only semicolon outside a quoted literal is the final one. Counting
         // semicolons would be wrong here - the payload legitimately contains two, and that is the point: they are
         // inside the literal, where SQL cannot read them as separators.
-        assert!(u.sql.ends_with(" WHERE PlayerID = 99;"));
+        assert!(u.sql.ends_with(" WHERE TeamID = 99;"));
         let (before_literal, _) = u.sql.split_once('\'').expect("a quoted literal");
         assert_eq!(
             before_literal.matches(';').count(),
@@ -254,23 +309,24 @@ mod tests {
 
     #[test]
     fn a_statement_with_nothing_to_set_is_refused() {
-        assert_eq!(to_update(&stmt("Player", &[]), "PlayerID"), Err(Refused::NoAssignments));
+        assert_eq!(to_update(&stmt("Teams", &[]), "TeamID"), Err(Refused::NoAssignments));
     }
 
     #[test]
     fn a_non_statement_message_is_refused() {
-        assert_eq!(to_update(&Msg::Bye, "PlayerID"), Err(Refused::NotAStmt));
+        assert_eq!(to_update(&Msg::Bye, "TeamID"), Err(Refused::NotAStmt));
     }
 
     #[test]
-    fn the_predicate_column_comes_from_the_caller_not_the_peer() {
-        // A peer cannot influence the WHERE clause: it is supplied locally.
-        let m = stmt("Player", &[("TeamID", StmtValue::Int(7))]);
-        let u = to_update(&m, "PlayerID").unwrap();
-        assert!(u.sql.contains("WHERE PlayerID = 99"));
-        // And a bad local column name is refused too, rather than trusted because it is "ours".
+    fn the_predicate_column_must_match_the_local_schema() {
+        // The commentary here used to say the predicate "is supplied locally, so a peer cannot influence it". The
+        // caller now takes it from the peer's statement, so that stopped being true - the schema check is what
+        // restores the property. A local column name is still validated rather than trusted because it is "ours".
+        let m = stmt("Teams", &[("PredictedRanking", StmtValue::Int(7))]);
+        let u = to_update(&m, "TeamID").unwrap();
+        assert!(u.sql.contains("WHERE TeamID = 99"));
         assert!(matches!(
-            to_update(&m, "PlayerID = 1 OR 1"),
+            to_update(&m, "TeamID = 1 OR 1"),
             Err(Refused::BadIdentifier(_))
         ));
     }

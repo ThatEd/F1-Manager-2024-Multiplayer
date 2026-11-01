@@ -1010,16 +1010,19 @@ mod tests {
     /// would bind the wrong one and write a plausible-looking wrong value.
     #[test]
     fn a_career_statement_roundtrips_with_its_types_intact() {
+        // Real names, from the game's own `Volta` schema: `Teams` is keyed `TeamID`, and `Teams_Colours` by
+        // `ColourID`. The previous payload used `StaffPS`/`StaffID`, where `StaffPS` is a statement catalogue
+        // rather than a table (audit §29.1) - harmless in a wire test, but the kind of name that gets copied.
         let msg = Msg::Stmt {
             seq: 42,
-            table: b"StaffPS".to_vec(),
-            pk_column: b"StaffID".to_vec(),
+            table: b"Teams".to_vec(),
+            pk_column: b"TeamID".to_vec(),
             pk: 1234567,
             set: vec![
-                (b"TeamID".to_vec(), StmtValue::Int(7)),
-                (b"FirstName".to_vec(), StmtValue::Text(b"Max".to_vec())),
-                (b"Salary".to_vec(), StmtValue::Real(1_250_000.5)),
-                (b"Notes".to_vec(), StmtValue::Null),
+                (b"TeamName".to_vec(), StmtValue::Text(b"McLaren".to_vec())),
+                (b"PredictedRanking".to_vec(), StmtValue::Int(7)),
+                (b"Confidence".to_vec(), StmtValue::Real(1_250_000.5)),
+                (b"ProfileText".to_vec(), StmtValue::Null),
             ],
         };
         assert_eq!(decode(&encode(&msg)).unwrap(), msg);

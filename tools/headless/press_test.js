@@ -56,15 +56,28 @@ let caseError = null;
 process.on('uncaughtException', (e) => { caseError = caseError || ((e && e.message) || String(e)); });
 process.on('unhandledRejection', (e) => { caseError = caseError || ((e && e.message) || String(e)); });
 
+/*
+ * How long to wait for a rendered result, scaled by load.
+ *
+ * These waits are not measuring anything: the headless render is deterministic, and the only variable is how
+ * much CPU the machine gives it. Under a full suite run - Rust tests in parallel, plus `gaps` and `surface`
+ * walking the export - a fixed budget that is ample alone becomes a failure, and the failure names the budget
+ * rather than the code. That happened here: this suite passed in isolation at 25/25 and reported 23/25 inside
+ * `run_all_tests.py`, with the two failures both being "the element did not appear in time".
+ *
+ * So the budget is generous by default and overridable, and a failure still prints what it actually saw.
+ */
+const WAIT_BUDGET_MS = Number(process.env.COOP_PRESS_WAIT_MS || 60000);
+
 /** Boot an app, load the shipping module into it, and tap engine.trigger to record events. */
 async function open(appId, quiet = true) {
   const l = load(appId, { quiet });
   const eng = readModule(l, 'common/core/Engine');
   const ready = await l.waitFor(() => {
     try { return eng.isCoherentPlayer() === true; } catch (_) { return false; }
-  }, { maxMs: 20000 });
+  }, { maxMs: WAIT_BUDGET_MS });
   if (!ready.ok) throw new Error('engine not ready');
-  await l.waitFor(() => l.document.body.childNodes.length > 0, { maxMs: 30000 });
+  await l.waitFor(() => l.document.body.childNodes.length > 0, { maxMs: WAIT_BUDGET_MS });
   await l.tick(1600);
 
   const sent = [];
@@ -247,22 +260,22 @@ async function run() {
       const list = P.list();
       return list.some((s) => /ContinueButton_root/.test(s) && /PRE_SESSION_RACE_START/i.test(s));
     };
-    let appeared = await l.waitFor(raceStartReady, { maxMs: 15000 });
+    let appeared = await l.waitFor(raceStartReady, { maxMs: WAIT_BUDGET_MS });
     if (!appeared.ok) {
       // Force a re-render now that the data is in place, then look again.
       try { P.seedDefaults(DS); } catch (_) { }
       nav.setDefault(-1);
       eng2.sendEvent('SetRaceView', 0);
       await l.tick(1200);
-      appeared = await l.waitFor(raceStartReady, { maxMs: 15000 });
+      appeared = await l.waitFor(raceStartReady, { maxMs: WAIT_BUDGET_MS });
     }
     // 4000ms was not enough when the whole suite ran concurrently: this is a real headless render of
     // RaceWeekendApp, and under load it took longer than four seconds. A fixed budget on a cost that varies
     // with machine load fails for reasons unrelated to what it tests - the same defect that made a live-server
     // suite report "timed out" after a Rust build. The render is deterministic, just slow when starved, so the
-    // budget is generous and the failure message says what it actually saw.
+    // budget is generous (`WAIT_BUDGET_MS`) and the failure message says what it actually saw.
     ok(appeared.ok, 'the race-start confirm appeared on PreSession',
-      appeared.ok ? '' : `waited 30s across two attempts; saw ${(P.list().filter((s) => /Continue/.test(s))[0] || 'nothing')}`);
+      appeared.ok ? '' : `waited ${2 * WAIT_BUDGET_MS / 1000}s across two attempts; saw ${(P.list().filter((s) => /Continue/.test(s))[0] || 'nothing')}`);
     if (appeared.ok) {
       const before = sent.length;
       const r = await invoke(P, 'press', 'advance');

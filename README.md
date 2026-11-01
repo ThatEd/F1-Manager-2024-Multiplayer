@@ -1,17 +1,19 @@
 # F1 Manager 2024 Multiplayer
 
-Co-op for **F1 Manager 2024** (Frontier Developments, UE 5.1, Steam appid 2591280). Two players run
-one career together: each manages their own team, the world clock is shared, and Steam's friends list
-is how you get into each other's session.
+Co-op for **F1 Manager 2024** (Frontier Developments, UE 5.1, Steam appid 2591280). The goal is two
+players running one career together: each manages their own team, the world clock is shared, and Steam's
+friends list is how you get into each other's session.
 
 This repo is the working bundle: code, tests and findings. It contains **no game files, no assets
 and no decompiled binaries** — see [Getting the data](#getting-the-data).
 
 ## Where it actually stands
 
-Read this before anything else. The honest summary is **the plumbing is proven, the multiplayer has
-never been played.** Two humans have not completed a co-op session, because it has never been
-launched with this code. Everything below reflects what has been *run*, not what is expected to work.
+Read this before anything else. The honest summary is **the race and coordination plumbing is proven
+offline and unplayed; career changes between players are built but cannot work on this build, for three
+reasons measured from the game's own data rather than guessed at** (audit §29). Two humans have not
+completed a co-op session, because it has never been launched with this code. Everything below reflects
+what has been *run*, not what is expected to work.
 
 | Area | State | Evidence |
 |---|---|---|
@@ -26,7 +28,7 @@ launched with this code. Everything below reflects what has been *run*, not what
 | Frame publisher | **Fixed — no second launch.** Both `POST /coop/host` and `/coop/join` start their own `coop-link.exe`; before that it was spawned by nothing, so the host armed the hook and nothing published - and a client had no link to receive through at all. Failures are reported per role, not folded into "Hosting" | [docs/COOP-PAPER-AUDIT.md](docs/COOP-PAPER-AUDIT.md) |
 | Received save | **Announced, not silent.** The client is told the host's save arrived and to load it; previously the transfer succeeded and the UI said nothing, so the client kept playing the old career | [docs/COOP-PAPER-AUDIT.md](docs/COOP-PAPER-AUDIT.md) |
 | Incidents and faults | **Not replicated.** The wire carries car positions, so each sim rolls its own dice and the two races contain *different events*. `docs/RNG-DETERMINISM.md` §5.2 specifies a replay format; nothing implements it. The roll site is `unknown` and needs the live process | [docs/COOP-PAPER-AUDIT.md](docs/COOP-PAPER-AUDIT.md) |
-| Career changes crossing between players | **Built (§22/§23/§27).** `Msg::Stmt` carries a typed row change and `stmtapply` applies it as one bounded `UPDATE` — identifiers allowlisted, values rendered as literals, predicate chosen locally — proven against real SQLite (`python -I run_all_tests.py stmt`), a hook captures the game's own statements, a policy decides what may replicate, and the far side applies it. What is unproven is whether the game's real SQL matches the parser - the heartbeat reports `writes/replicated/refused/unsupported` so the first session says exactly how far it got | [docs/COOP-PAPER-AUDIT.md](docs/COOP-PAPER-AUDIT.md) |
+| Career changes crossing between players | **Built, but it cannot succeed on this build — measured offline (§29).** `Msg::Stmt` carries a typed row change and `stmtapply` applies it as one bounded `UPDATE` — identifiers allowlisted, values rendered as literals, predicate taken from the local schema — proven against real SQLite (`python -I run_all_tests.py stmt`). Three layers under it were pointed at things that do not exist: the allowlist's seven of eight names were `PSCollection` **catalogues**, not tables (now derived from the game's own `Volta` database, 317 tables, and checked by `tools/schema_truth.py`); the capture hook patches `sqlite3_exec`, which career writes never reach (361 of 428 writes are parameterised, and `sqlcap` parses **0** of the 67 that do land there); and no replicable `UPDATE` names the team, so attribution would refuse all of them. The transport and the applier are sound; the producer has to move to the bind layer. | [docs/COOP-PAPER-AUDIT.md](docs/COOP-PAPER-AUDIT.md) §29 |
 | Steam "Join Game" | **Code complete, unrun.** Lobby create/join/`+connect_lobby` implemented; three bugs that made it impossible are fixed (callback id `3334` -> `333`, lobby id never adopted, invite path refused a real invite). Needs a live Steam client | [docs/STEAM-JOIN.md](docs/STEAM-JOIN.md) |
 | Team picker (one team each) | **Fixed and unit-tested.** A host could take all ten teams and lock the other player out: object keys are strings, `myTeam` is a number, so no claim was ever released. Claims also now cross the relay instead of staying in one process | `tools/headless/team_claim_test.js`, `python -I run_all_tests.py teams e2e` |
 | Rich presence | **Code complete, unrun.** `status` key path avoids the publisher-token problem of `steam_display` | [docs/RICH-PRESENCE.md](docs/RICH-PRESENCE.md) |

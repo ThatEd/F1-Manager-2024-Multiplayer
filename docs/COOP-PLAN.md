@@ -184,7 +184,7 @@ So **"my side of the garage" is a `LoadoutID`** and **"facilities come from Play
 | system | owner |
 |---|---|
 | car setup, tyre allocation, driver commands, pit strategy | each player owns **their own `LoadoutID`** |
-| car development / research (`PartsPS`) | **Player A** (team principal) |
+| car development / research (`Parts_Designs`, `Parts_Projects`, `Parts_Items`) | **Player A** (team principal) |
 | facilities / HQ (`BuildingsPS`, `Buildings_HQ`) | **Player A** |
 | pit crew training | **Player A** |
 | finances | Player A writes, B reads |

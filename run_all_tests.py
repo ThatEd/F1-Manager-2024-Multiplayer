@@ -185,7 +185,7 @@ if shutil.which("node"):
     # payload is data rather than syntax - the difference between "the escaping looks right" and "DROP TABLE did
     # not happen".
     suite("stmt", [sys.executable, "-I", os.path.join(TOOLS, "stmt_injection_test.py")],
-          HERE, lambda out: passed_count(out, 12))
+          HERE, lambda out: passed_count(out, 14))
 
     # Is the recorded sqlite3_exec address still right, and can a statement-capture hook be located at all? The
     # binary carries no sqlite symbols, so every address comes from a byte signature; this checks the one the mod
@@ -193,6 +193,17 @@ if shutil.which("node"):
     suite("sqlite", [sys.executable, "-I", os.path.join(TOOLS, "verify_sqlite.py")],
           HERE, lambda out: ("OK: the recorded sqlite3_exec address is right" in out)
           or out.strip().startswith("SKIP"))
+
+    # Do the tables this build replicates actually exist in the game's database?
+    #
+    # They did not. `Content/Database/*PS.json` was read as one table per file, so `StaffPS` was taken for a table;
+    # it is a `PSCollection` - a catalogue of prepared statements whose text names `Staff_Contracts`. Seven of the
+    # eight allowlisted names were that mistake, and `scope_of` classified eight more names that do not exist.
+    # `coop-mem/src/schema.rs` is now derived from `/Game/Database/Volta`, which is a real SQLite file (317 tables,
+    # user_version 336) inside a `DatabaseAsset`, and this tool re-derives the list from it and fails on any
+    # disagreement in either direction - so the constants cannot drift from the export.
+    suite("schema", [sys.executable, "-I", os.path.join(TOOLS, "schema_truth.py")],
+          HERE, lambda out: ("SCHEMA OK" in out) or out.strip().startswith("SKIP"))
 
     # Is an install complete? The failure mode is never "the deploy failed" - it is "the deploy installed almost
     # everything", and each missing piece is silent in a different way (version.dll absent = agent never loads;

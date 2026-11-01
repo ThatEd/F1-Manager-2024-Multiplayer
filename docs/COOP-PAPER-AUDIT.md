@@ -1313,6 +1313,223 @@ reason rather than silently. That is the strongest position reachable without la
 
 ---
 
+## 29. The table list was built from file names, and the producer watches the wrong layer
+
+Two findings, both found by decoding a game asset instead of reading prose about it, and both of a kind that no
+amount of unit testing would have caught: the code was correct and tested, and pointed at things that do not exist.
+
+### 29.1 `StaffPS` is not a table. It is a statement catalogue, and seven of the eight allowlisted names were phantom
+
+`Content/Database` holds 26 files named `*PS.json`, each a few kilobytes to 63 KB. They were read as **one table per
+file** throughout this project - `GAME-SCOPE.md` says "26 table definitions (`*PS.json`, 276 KB total)", `COOP-PLAN.md`
+and `CAREER-COOP-PLAN.md` both discuss `StaffPS` as "23% of the schema", and `replicate::REPLICABLE` allowlisted
+`Player`, `StaffPS`, `PartsPS`, `SponsorshipPS`, `FinancesPS`, `ScoutingPS`, `CarPS`, `TeamPS`.
+
+Every one of those files announces what it is:
+
+```
+Type   : PSCollection
+Class  : UScriptClass'PSCollection'
+Name   : StaffPS
+entry  : {"Key": "AddStaffContract",
+          "Value": "INSERT OR REPLACE INTO Staff_Contracts ( StaffID, ContractType, TeamID, ... ) VALUES (?1, ...)"}
+```
+
+A `PSCollection` is a catalogue of **named prepared statements**. The table is `Staff_Contracts`. There is no table
+called `StaffPS`, `PartsPS`, `TeamPS`, `CarPS`, `FinancesPS`, `ScoutingPS` or `SponsorshipPS`; and `scope_of`'s
+`Finances`, `Parts`, `PartsAuto`, `Regulations`, `Calendar`, `WeatherHistory`, `Difficulty` and `CurrStaffContracts`
+do not exist either. `tools/schema_truth.py` now enumerates what does, and `tools/schema_truth.py` before the fix
+printed:
+
+```
+FAIL: 8 disagreement(s) between the code and the game's own schema:
+  - scope_of classifies CurrStaffContracts, which is not a table in the database
+  - scope_of classifies Finances, which is not a table in the database
+  ... (six more)
+```
+
+**The truth was in the export all along.** `/Game/Database/Volta` is a `DatabaseAsset` whose `Data` property is a
+byte array beginning `SQLite format 3\0`:
+
+| property | value |
+|---|---|
+| decoded size | 3 649 536 bytes, and it is a SQLite file |
+| `user_version` | 336 (matching the 336 `Volta_NNNN_to_NNNN.json` migration diffs) |
+| objects | **317 tables**, 2 views (`Staff_DriverData_View`, `Staff_Contracts_View`) |
+| seed rows | `Teams` 32, `Player` 1, `Staff_GameData` 446, `Seasons` 5, `Races_Tracks` 26 |
+
+So the schema was not merely inferable, it was sitting in the export as a database. `coop-mem/src/schema.rs` is now
+derived from it, and `tools/schema_truth.py` re-derives the list from `Volta` and fails if the two disagree in either
+direction, so the constants cannot drift.
+
+**What the derivation allows, and why it is narrower than the old list was long.** `Msg::Stmt` carries *one* key, so a
+composite-key row cannot be named by it:
+
+| career tables the game writes | 141 |
+|---|---|
+| single-column primary key | 58 |
+| **single PK *and* a `TeamID` column** (replicable) | **16** |
+| composite primary key (refused until the wire carries a full key) | 77 |
+| no declared key (rowid) | 6 |
+
+`Staff_Contracts` - the table the old allowlist was *trying* to reach through `StaffPS` - is
+`PRIMARY KEY (StaffID, ContractType, TeamID)`. `UPDATE ... WHERE StaffID = 8` would hit both the Current and the
+Future contract at the far end, so refusing it is the correct behaviour and the eight-name list was reaching for a
+table it could not have carried anyway.
+
+The 16 replicable tables, each with the key and team column `Volta` declares: `Parts_Designs`, `Races_GridPenalties`,
+`Scouting_Staff_Bonuses`, `Scouting_Staff_DriverRivalryEventLogs`, `Scouting_Staff_RaceEngineerDriverAssignments`,
+`Sponsorship_EngagementActivities`, `Sponsorship_EngagementActivities_Locks`, `Staff_NarrativeData`,
+`Staff_PitCrew_DevelopmentPlanGlobalData`, `Staff_Team_CAS`, `SubTeam_Assignments`, `Teams`, `Teams_Colours`,
+`Teams_MiscRecord`, `Teams_PitCrewRecordSinceGameStart`, `Teams_RaceRecordSinceGameStart`.
+
+**A second bug fell out of the first.** `plan` checked *attribution* before it checked whether the table was
+replicable, so every phantom name was reported as `NoTeam` ("the statement names no team") when the truth was
+"this table does not exist". Since every table in the old list was phantom, the refusal reason was wrong for
+100% of inputs. The order is now schema-first, and `plan` also refuses a statement whose `WHERE` column is not the
+key the schema declares (`Refused::WrongKey`) - because `pk_column` travels on the wire from the peer's own
+statement, and a peer naming a different column would have the local `UPDATE` match many rows. `stmtapply` checks
+the same thing independently, so the receiver is not the weak half of the decision.
+
+### 29.2 The producer watches `sqlite3_exec`, and no career write goes through `sqlite3_exec`
+
+This is the one that matters most, and it is measurable from the export alone.
+
+Of the 428 write statements in the catalogue:
+
+| kind | count | what carries the data |
+|---|---|---|
+| parameterised (`?1`, `@Opt…`) | **361** | SQLite **bindings** |
+| literal, exec-able | 67 | the statement text |
+
+`sqlite3_exec` takes one string and runs it. It cannot see a bound value: `INSERT OR REPLACE INTO Staff_Contracts
+(...) VALUES (?1 … ?12)` reaches `sqlite3_exec` with twelve `?` in it and the values nowhere near it. A parameterised
+statement is executed through `sqlite3_prepare_v2` + `sqlite3_bind_*` + `sqlite3_step`, and `sqlite3_exec` is never
+called at all.
+
+Both exist in this build, and the call-site counts settle which one the game uses for its career work:
+
+| function | RVA | call sites in the image |
+|---|---|---|
+| `sqlite3_exec` | `0x156D300` | **16** |
+| `sqlite3_prepare_v2` | `0x15116E0` (a 5-byte thunk to `0xD230220`) | **133** |
+
+133 to 16. The engine's data layer is prepared statements, which is what a modern SQLite wrapper looks like, and it
+is why the capture hook - which patches `sqlite3_exec` - sees almost nothing of a career.
+
+Then the 67 statements that *do* reach `sqlite3_exec` were run through the real `sqlcap::classify` and
+`replicate::plan` — reproducibly, since a number remembered from one session is the kind of claim this document
+has had to retract before:
+
+```
+python -I tools/schema_truth.py --dump exec_visible.json
+cargo run --release -p coop-mem --example sqlcap_probe -- exec_visible.json
+```
+
+```
+67 statements the game runs through sqlite3_exec:
+  read            : 0
+  unsupported     : 67
+  parsed + planned: 0
+  parsed + refused: 0
+```
+
+**Zero of 67.** They are housekeeping: `DELETE FROM Fanfares`, `DELETE FROM Parts_Items`, `DELETE FROM
+Save_TimingManager_Laps`, `UPDATE Parts_Designs SET ManufactureCount = 0`, `UPDATE Player_State SET Day = Day + 1`,
+`INSERT INTO Staff_PerformanceStats_StartOfMonth ( StaffID, StatID, Val ) SELECT …`. Most are `DELETE` (53), which
+`sqlcap` does not parse at all; the rest are `UPDATE` with no `WHERE` or with a subquery predicate - and a bare
+`UPDATE Parts_Designs SET ManufactureCount = 0` must never be replicated, because it is a whole-table reset.
+
+So §23's claim - "the producer is built and wired" - was true of the plumbing and false of the input. The hook is
+installed at an address that career writes do not use, the parser refuses every statement that address does see,
+and the allowlist matched none of the tables involved either way. Three independent layers, each individually
+tested, all pointed at the wrong thing; the heartbeat would have reported `sql capture fired xN writes=0` forever
+and the honest reading of that line is now documented next to it.
+
+**What this means for the goal.** The current design can never replicate a career change, and no amount of
+observation at `sqlite3_exec` will fix that. The producer has to move down a layer: either
+
+* hook `sqlite3_bind_*` (or `sqlite3_step`) and reconstruct a change from the bindings plus the prepared statement's
+  text, or
+* read the database after the fact and diff it, which needs no hook at all and is bounded by the ~3.8 KiB/car and
+  63 KB/table costs already in `GAME-SCOPE.md`, or
+* capture at the game's own statement layer, where the `PSCollection` key (`AddStaffContract`) and its arguments
+  exist together - which is the same information the engine itself has, and is the smallest correct change.
+
+Each is a real piece of work and none can be validated without the game. They are recorded as the next step rather
+than attempted here, because guessing at a bind signature offline is exactly the failure this section is about.
+
+### 29.3 The applied change was captured and sent back
+
+`apply_remote_stmt` executes its `UPDATE` through the game's own `sqlite3_exec` - the address the capture hook
+patched. So the hook fired on our own write, `plan` accepted it (the row's team reads as ours because we just wrote
+it), a fresh sequence number was allocated, and the frame went back to the peer whose agent applied it and sent it
+back. Every lap is a duplicate write into a live career, and the only symptom is `SQL_SEQ` climbing on a player who
+is doing nothing.
+
+Fixed with a thread-local set around the apply (`without_capture`), because the apply runs on the inbound worker
+thread and a global flag would also suppress a genuine game-thread write during the same window. Two tests, both
+proven by planting the regression:
+
+| planted | caught by |
+|---|---|
+| remove the `capture_suppressed()` check in the sink | `a_statement_this_agent_applies_is_not_replicated_back`, naming the consequence |
+| restore the guard by assignment instead of `Drop` | `the_capture_guard_is_restored_even_when_the_body_fails` |
+
+The second one caught a real bug in the fix: the first version restored the flag *after* the closure, so a panic
+inside it left capture suppressed for the rest of the session - a machine that silently stops replicating its own
+writes while the heartbeat still reports the hook installed. That is the third time in this project that a
+mechanism was "installed, tested and inert" and the lesson is the same each time: the test has to assert the
+observable the failure would destroy, not the shape of the call.
+
+### 29.4 Even a correct hook would have refused every replicable UPDATE, because they never name the team
+
+One more layer of the same mistake, found by asking the question the previous section implies: *if* the producer
+could see a career `UPDATE`, would `plan` accept it?
+
+`plan` reads the owning team from the values being set (`team_in`), and the 16 replicable tables were chosen because
+they have a `TeamID` column. Having the column is not the same as a statement setting it. Of the 18 `UPDATE`
+statements written against those 16 tables:
+
+| | count |
+|---|---|
+| `UPDATE` statements on replicable tables | 18 |
+| …that set `TeamID` | **0** |
+| …that do not | 18 |
+
+Every one sets a single business column and identifies the row by its key:
+`Parts_Designs` / `SetPartsDesignWork` → `DesignWork = ?2`; `Races_GridPenalties` / `ServeGridPenalty` → `Served = 1`;
+`Staff_PitCrew_DevelopmentPlanGlobalData` / `SetPitCrewTrainingFocus` → `TrainingFocus = ?2`. So `team_in` returns
+`None`, `plan` returns `Refused::NoTeam`, and **every** replication attempt would have been refused even with a
+perfect hook on the right layer.
+
+The design has the team in the wrong place. The team of a row is a property of the *table and row*, not of the
+assignment list: `Parts_Designs.TeamID` is a column of the row the `WHERE DesignID = ?1` selects. Attribution
+therefore has to come from one of:
+
+* a read of the row before the change (`SELECT TeamID FROM <table> WHERE <pk> = ?`), which is one extra statement
+  per replicated change and is the smallest correct fix, or
+* the schema, for the tables where the key *is* the team (`Teams`, `Teams_MiscRecord`,
+  `Staff_PitCrew_DevelopmentPlanGlobalData`, `Sponsorship_EngagementActivities_Locks`,
+  `Teams_PitCrewRecordSinceGameStart`, `Teams_RaceRecordSinceGameStart` all have `TeamID` as their key, so the
+  team is the key), or
+* the wire, carrying the team with the change instead of trying to derive it.
+
+Recorded rather than fixed, because whichever of those is chosen changes what `Msg::Stmt` means and the choice
+should be made with the layer fix in §29.2, not before it. What is *not* acceptable is leaving the current
+arrangement, where the authorisation check cannot be reached for any real input: it reads as enforcement and is
+dead code, which is the fourth instance in this project of a mechanism that is present, tested and inert.
+
+### 29.5 What is still not proven, corrected
+
+| previously stated | now |
+|---|---|
+| "whether the game's real `UPDATE` shapes parse - the first session will say" | **answered offline, and the answer is no**: none of the 67 exec-visible statements parse, and the 361 that carry career data never reach the hooked function at all |
+| "whether the real key columns are what the statement says" | **answered**: from `Volta`, not from the statement. 77 career tables have composite keys and are refused |
+| the eight-name allowlist covers career tables | **wrong for 7 of 8**, and the eighth (`Player`) has a composite key and cannot be carried either |
+
+---
+
 ## Summary of what this audit changed
 
 ### What is still not proven
@@ -1328,8 +1545,11 @@ measurement, not an assumption, and it is the next thing the game can tell us th
 
 | finding | severity | state |
 |---|---|---|
-| a lost clock frame desynced the pause state permanently, because nothing re-published it | **high** | **fixed**: the agent heartbeat re-publishes while paused; guarded by an 18-assertion suite |
-| `coop-auth` is complete and never called, while comments claim it enforces team rules | **medium** - nothing broken today, but the guarantee was absent | **fixed**: gated at both write chokepoints (`LiveDb::sql`, `LiveDb::write_car`), with wiring tests |
+| **the replication allowlist was built from file names**: `StaffPS`, `PartsPS`, `TeamPS`, `CarPS`, `FinancesPS`, `ScoutingPS`, `SponsorshipPS` are `PSCollection` **statement catalogues**, not tables, so 7 of 8 entries could never match; `scope_of` classified 8 more names that do not exist | **critical** - the career layer could not replicate anything, and the refusal reason (`NoTeam`) was wrong for every input | **fixed** (§29.1): `coop-mem/src/schema.rs` derived from the game's own `Volta` database (`user_version` 336, 317 tables, decoded from a `SQLite format 3` byte array in the export); 16 tables qualify on a single-column key plus `TeamID`; `tools/schema_truth.py` re-derives the list and fails on any disagreement in either direction; `plan` and `stmtapply` both require the predicate to be the schema's key |
+| **the producer watches the wrong layer**: career writes use `sqlite3_prepare_v2` + bindings (133 call sites) and never reach `sqlite3_exec` (16 call sites), which the capture hook patches. Of the 67 statements that *do* reach `exec`, `sqlcap` parses **0** | **critical** - §23's "producer built and wired" was true of the plumbing and false of the input; the heartbeat would have read `fired xN writes=0` forever | **recorded, not fixable offline** (§29.2): the producer must move to the bind layer, a post-hoc DB diff, or the game's own statement layer. Measured reproducibly with the real parser via `tools/schema_truth.py --dump` + `examples/sqlcap_probe.rs`; no signature guessed |
+| **an applied change was captured and replicated back**, so two agents would bounce one write between them forever | **high** - duplicate writes into a live career, with `SQL_SEQ` climbing on an idle player as the only symptom | **fixed** (§29.3): thread-local `without_capture` around the apply, restored by `Drop`; two tests, both proven by planting the regression - the second caught a panic-leak in my own fix |
+| **the team-authority check could never run**: `plan` derives the owning team from the columns being set, and of the 18 `UPDATE` statements against the 16 replicable tables, **none** set `TeamID` - so every attempt would have been refused as `NoTeam` even with a perfect hook | **high** - the authorisation rule reads as enforcement and is unreachable for every real input | **recorded** (§29.4): the team is a property of the row, not of the assignment list. The fix (read the row's `TeamID`, use the schema where the key is the team, or put the team on the wire) changes what `Msg::Stmt` means and should be chosen with the layer fix, not before it |
+| a lost clock frame desynced the pause state permanently, because nothing re-published it | **high** | **fixed**: the agent heartbeat re-publishes while paused; guarded by an 18-assertion suite || `coop-auth` is complete and never called, while comments claim it enforces team rules | **medium** - nothing broken today, but the guarantee was absent | **fixed**: gated at both write chokepoints (`LiveDb::sql`, `LiveDb::write_car`), with wiring tests |
 | **team retarget's "edit then reload" loses the edit**: `LoadGame` re-reads from disk, and nothing persists a runtime `UPDATE` | **high** - the recommended Versus implementation cannot work as written | recorded; the fix is a persistence step, and the first experiment is specified in §10 |
 | **the documented 30-name save-slot space is not the file space** (`save165`–`save168` and `customisation.sav` exist outside it) | **medium** - a co-op session named with an invented `slotName` may never be loadable | recorded in §11; the design should use an observed slot name |
 | **a protocol version mismatch was reported as "unreadable frame"**, discarding the reason that identifies it | **medium** - the ordinary failure after an update, misdiagnosed as a network problem | **fixed**: `BadVersion` is named with the peer version and the action; both halves tested |
@@ -1339,6 +1559,7 @@ measurement, not an assumption, and it is the next thing the game can tell us th
 | **a declared frame length was trusted without limit** | medium - memory exhaustion reachable from the other machine (`coop-link` had no buffer cap) | **fixed**: `MAX_FRAME` refuses it as an error, so callers resync instead of accumulating |
 | **the resync path never resynced**: `split_frame` returned an empty frame that `drain(..0)` removed nothing of | medium - a corrupt header poisoned the stream forever; with the length cap it would have become a hot loop | **fixed**: `split_frame` returns `Result`, the reader clears and reports the drop |
 | a live-server test had a fixed 12 s deadline that starved under load | low - but a red result that may be noise trains people to ignore red | **fixed**: 60 s, overridable, fails fast if the server exits, and prints its output |
+| **the `press` suite had the same defect a second time**: `15 000 ms` twice on a headless `RaceWeekendApp` render, which passed 25/25 alone and reported 23/25 inside `run_all_tests.py` | low, but it is the failure mode that erodes trust in the suite: a red that is really "the Rust build was also running" | **fixed**: one overridable `WAIT_BUDGET_MS` (60 s, `COOP_PRESS_WAIT_MS`) for every wait in the file, and the failure message now prints the budget it used rather than a hardcoded number that can drift from the code |
 | **`coop-link` wrote received saves to a hardcoded `SaveGames`**, while the game keeps one folder per profile | **high on another machine** - the transfer reports success and the save lands where the game never looks | **fixed**: picks the folder whose newest `.sav` is newest; tested on a synthetic layout and against the real one |
 | **the career layer is designed and not built**: nothing on the wire carries management state, so both players edit one DB and only the host's edits survive a save | **critical for the stated goal** - "a full career together" is not achievable as built, and Versus advertises a garage it cannot provide | **built (§22, §23, §27)**: `Msg::Stmt` carries a typed row change, `stmtapply` applies it as one bounded `UPDATE` (proven against real SQLite), the hook captures the game's statements, a policy decides what may replicate, and the receiving side applies it. Whether the game's real SQL matches the parser is the one thing left, and the log reports it either way |
 | **~200 MiB/s is copied out of the game per snapshot** to build a 2.4 KiB frame (10.07 MiB read at 20 Hz) | medium - works, but the cost model was never checked, and a live test would blame the network | **fixed**: `read_cars_sparse` reads ~83 KiB per snapshot for identical output, behind `--sparse` |

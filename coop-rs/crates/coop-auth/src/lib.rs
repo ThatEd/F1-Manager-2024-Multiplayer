@@ -378,20 +378,34 @@ pub fn scope_of(table: &str) -> Option<Scope> {
         "Teams_PriorityList_Setting_DevelopBuildingData" => Scope::PerTeam,
         "Teams_PitCrewRecordPerSeason" => Scope::PerTeam,
         "Staff_PitCrew_DevelopmentPlan" => Scope::PerTeam,
-        "CurrStaffContracts" => Scope::PerTeam,
         "Staff_Contracts" => Scope::PerTeam,
         "Staff_ContractOffers" => Scope::PerTeam,
-        "Finances" => Scope::PerTeam,
-        "Parts" => Scope::PerTeam,
-        "PartsAuto" => Scope::PerTeam,
+        // The garage and its money are per-team, and the real table names carry a prefix: there is no table called
+        // `Finances` or `Parts`. `Part` here means the design catalogue and the part bins, not `PartsPS`, which is
+        // the statement catalogue (see `coop_mem::schema`).
+        "Finance_TeamBalance" => Scope::PerTeam,
+        "Finance_TeamBudget" => Scope::PerTeam,
+        "Finance_Transactions" => Scope::PerTeam,
+        "Parts_Designs" => Scope::PerTeam,
+        "Parts_Projects" => Scope::PerTeam,
+        "Parts_Items" => Scope::PerTeam,
+        "Parts_Items_Faults" => Scope::PerTeam,
+        "Parts_TeamExpertise" => Scope::PerTeam,
 
         // World-level single truth.
         "Player_State" => Scope::World,
-        "Regulations" => Scope::World,
         "Seasons" => Scope::World,
-        "Calendar" => Scope::World,
-        "WeatherHistory" => Scope::World,
-        "Difficulty" => Scope::World,
+        // The calendar is `Calendar_LastActivityDates` plus `Races`; there is no table called `Calendar`.
+        "Calendar_LastActivityDates" => Scope::World,
+        "Races" => Scope::World,
+        // Regulations are three real tables; there is no table called `Regulations`.
+        "Regulations_Enum_Changes" => Scope::World,
+        "Regulations_Proposals" => Scope::World,
+        // Weather history is stored per-save; there is no `WeatherHistory` table.
+        "Save_WeatherHistory" => Scope::World,
+        // Difficulty is two tables; there is no table called `Difficulty`.
+        "Difficulty_RaceSim" => Scope::World,
+        "Difficulty_TeamManagement" => Scope::World,
 
         // Race outcome, host-arbitrated.
         "Save_Weekend" => Scope::RaceResult,
@@ -546,7 +560,10 @@ mod tests {
 
     #[test]
     fn every_table_this_project_touches_is_classified() {
-        // A table with no scope cannot be checked, so it must not silently pass. This lists what we use.
+        // A table with no scope cannot be checked, so it must not silently pass. This lists what we use, and every
+        // name here is a real table in `Volta` (`tools/schema_truth.py` proves it) - the earlier version named
+        // `Regulations` and `Calendar`, which are not tables at all, so those two assertions were testing the
+        // classifier against names the game never sends.
         for t in [
             "Save_CarConfig",
             "Save_DriverCommands",
@@ -556,8 +573,8 @@ mod tests {
             "Teams_PriorityList_Setting_DevelopBuildingData",
             "Staff_Contracts",
             "Player_State",
-            "Regulations",
-            "Calendar",
+            "Regulations_Enum_Changes",
+            "Calendar_LastActivityDates",
             "Save_Weekend",
             "Save_RaceControl",
         ] {
@@ -567,5 +584,11 @@ mod tests {
         assert_eq!(scope_of("Player_State"), Some(Scope::World));
         assert_eq!(scope_of("Buildings_HQ"), Some(Scope::PerTeam));
         assert_eq!(scope_of("not_a_table"), None);
+        // The asset-catalogue names that used to pass for tables. Classifying them earned nothing - no statement
+        // the game runs names them - and made the table list look complete when it was not.
+        for phantom in ["Finances", "Parts", "PartsAuto", "Regulations", "Calendar", "WeatherHistory",
+                        "Difficulty", "CurrStaffContracts"] {
+            assert_eq!(scope_of(phantom), None, "{phantom} is not a table");
+        }
     }
 }
