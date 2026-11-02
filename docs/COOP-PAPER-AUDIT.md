@@ -1724,3 +1724,72 @@ What remains genuinely open, and needs the game:
 - whether a lobby is joinable;
 - whether the UE4SS crash recurs with UE4SS disabled (`tools/ue4ss_isolation.py`);
 - whether the `write_car` team mapping in §2 is right.
+
+---
+
+## 31. What the static exe map settled (offline)
+
+`E:\Downloads\Experimental\12th-team\EXE  Map` is a static xref database for `F1Manager24.exe`
+(382,078 functions from the exception table, 28,847 names, 754,711 direct calls, 796,628 data refs, plus
+`native_funcs.csv` - 13,863 UFunction native-exec registrations - and `vtables.csv`). It was built for the
+12th-team investigation and used here to settle three multiplayer questions that the UI export could not.
+
+Its own documented limits matter for what follows: game classes (`RaceSim`, `RaceManagement`, `GameDatabase`,
+`GUI`, `Kepler`) have **no RTTI**, so no vtables; virtual and indirect calls are recorded but not resolved,
+so `path` can report "no path" through a vtable; and property offsets are zero in the static records.
+
+### 31.1 The session start is not a UFunction, and not a Gameface event - confirmed from the exe side
+
+`URaceSimManager` (the class the UI's race-weekend screen talks to) exposes **33** reflected functions, and
+every one of them is a getter or an event callback:
+
+* getters: `GetCurrentLap`, `GetLatestRaceTime`, `GetPlaybackRate`, `GetSimTimeCompleted`, `GetSessionTime`,
+  `GetTimeRemaining`, `GetTrackLength`, `GetRaceLapCount`, `GetPlayerTeamCarActors`, `GetTeamFromPitStopIndex`,
+  `IsRaceEventActive`, `IsRaceSimTimeValid`.
+* callbacks: `OnRaceSimEventReceived`, `OnCarReleasedStart`, `OnCarReleasedEnd`, `OnPitStopManagerLoadComplete`.
+
+**There is no `Start`, `Simulate`, `Proceed`, `EnterSession` or `Launch` UFunction on it.** Queried the same
+way, the whole native-exec table has no `StageProceed`, `TravelToRaceWeekend`, `AdvanceToNextEvent`,
+`StartRace`, `BeginSession` or `EnterWeekend` registration at all - the only `StartSession` natives are
+`UAnalyticsBlueprintLibrary`'s. `URaceSimOnboarding` has `OnboardingPauseRaceSim` / `OnboardingResumeRaceSim`
+/ `OnboardingStartRaceSimTutorial` - pause, resume, and a tutorial, but no start.
+
+This is the exe-side confirmation of what [UI-COMMANDS.md](UI-COMMANDS.md) concluded from the JS side: the
+session start is not reachable through any reflected function or any Gameface event the UI sends. The lever
+the README names (`StageProceed`, `TravelToRaceWeekend` in the exe's event-name table with zero UI references)
+is real as far as the strings go, but the map shows there is no UFunction behind those names either - they are
+Gameface event names dispatched into the `*ProtoGUIManager` bridge, whose methods are **not reflected at all**
+(`UMainMenuProtoGUIManager`, `UManagementProtoGUIManager`, `URaceSimProtoGUIManager` all have `n_functions = 0`
+in the classes table).
+
+### 31.2 `simulate` has no static caller - the hook-by-signature was the only option
+
+The agent hooks `simulate` at RVA `0x2298080` (61 bytes, member function, `this` in RCX). The map confirms:
+exactly **one** direct caller (`0x22989df`, 527 bytes), and that caller has **no** direct callers and **no**
+data references to it anywhere. It is reached through engine dispatch that static analysis cannot see. So
+"hook it by prologue signature" was not a shortcut - it was the only available method, and the map proves
+there was no xref path to find instead. The same is true of `0x22989df` itself.
+
+### 31.3 The career database is read-only through reflection - the `LiveDb` approach was necessary
+
+`UDatabaseBlueprintFunctionLibrary` exposes 26 reflected functions and every one is a read:
+`GetTeamStanding`, `GetPlayerTeam`, `GetTeamColours`, `GetRaceInProgress`, `GetPlayerStaffMemberID`,
+`GetOtherDriverInTeam`, `GetTitleRaceTeams`, `GetCountryOfTrack`, ... **No setter exists.** The career
+database's writes reach SQLite only through the game's own SQL layer, which is why the multiplayer project
+reaches the live database through the game's own `sqlite3_exec`/`LiveDb` at all - and why §29's finding (that
+the writes travel through `prepare_v2` + bindings, not `exec`) matters. There is no reflected write path to
+hook instead; the SQL layer is the only write path, and it is the one the diff producer now reads.
+
+### 31.4 What the map could not settle (and still cannot)
+
+* Which `*ProtoGUIManager` method a given Gameface event name dispatches to - the bridge's methods are
+  unreflected, and the event-name strings live in the Coherent layer, not in a form the static map ties to
+  a function. This is the same gap as UI-COMMANDS.md §3's "starting a race session".
+* The roll site for incidents (§24) - `Save_RaceSimCars_Incident` writes are SQL, and the map has no SQL
+  statement text.
+* Field offsets inside runtime objects - the map's own "known limits" says property offsets are zero
+  statically.
+
+The map is a instrument for *structure*, and it settled three structural questions. It does not make the
+session-start problem solvable from here; it makes the conclusion stronger: the start is behind an
+unreflected bridge, and finding it needs the live process or the bridge's own dispatch table.
