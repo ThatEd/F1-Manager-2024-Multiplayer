@@ -833,9 +833,10 @@ fn apply_remote_stmt(table: &str, pk_column: &str, pk: i64,
     let update = coop_mem::stmtapply::to_update(&msg, pk_column)
         .map_err(|r| r.message())?;
 
-    // Attached per call rather than cached: `LiveDb` holds raw handles in `Cell`s and so is not `Sync`, and making
-    // it so to save an attach on a rare event would change a type the whole write path depends on. Attaching costs
-    // a `OpenProcess` plus a symbol scan, and a career change happens at human speed.
+    // One handle, shared with the career-diff poller. Attaching per call was acceptable when this was the only
+    // user - a career edit happens at human speed - but a poller reading every three seconds made "attach per
+    // statement" a thread per statement, and each attach scans the whole process's memory to find the database.
+    // `shared_db` attaches once and holds it, and `LiveDb` is `Send`, so the mutex is all the sharing needs.
     //
     // `std::process::id()` is deliberate: this runs inside the game, so "the target" *is* this process. Attaching
     // to yourself is unusual but not a mistake - `LiveDb` reaches the database through `ReadProcessMemory`/
@@ -846,14 +847,14 @@ fn apply_remote_stmt(table: &str, pk_column: &str, pk: i64,
     // The statement runs inside `without_capture`, because the game's `sqlite3_exec` is the address the capture
     // hook patched: applying a peer's change makes the hook fire, and without suppression this agent would
     // replicate that change straight back to the peer that sent it.
-    let db = coop_mem::livedb::LiveDb::attach(std::process::id())
+    let mut guard = shared_db()
         .map_err(|e| format!("no live database attached (start a career first): {e}"))?;
+    let db = guard.as_ref().ok_or_else(|| "no live database attached".to_string())?;
     without_capture(|| db.sql(&update.sql))
         .map_err(|e| format!("sqlite refused it: {e}"))?;
+    drop(guard);
     Ok(format!("{} column(s)", update.sql.matches('=').count().saturating_sub(1).max(1)))
-}
-
-/// The hook callback for `sqlite3_exec`: runs on the game thread, inside SQLite's entry point.
+}/// The hook callback for `sqlite3_exec`: runs on the game thread, inside SQLite's entry point.
 ///
 /// Kept tiny and total for the same reason `on_sim` is: this executes in the middle of the game's own call, so a
 /// panic, an allocation spree or a lock here would stall or kill the sim. It classifies the text with a pure
@@ -2575,10 +2576,36 @@ pub fn start_join_listener() {}
  * bugs.
  */
 
+/// The poller's handle to the live database, shared with the inbound apply path.
+///
+/// `LiveDb::attach` finds the database by scanning the process's memory and starts a worker thread inside the game.
+/// The apply path used to attach per call, which was acceptable at human speed but wrong once a poller also reads
+/// every three seconds: each attach is another thread inside the game. One handle behind a `Mutex` serves both.
+///
+/// `LiveDb` is `Send` (its `Cell`s make it `!Sync`, not `!Send`), so a `Mutex` is all the sharing needs. The mutex
+/// is held for the duration of one statement, which is the same serialisation SQLite already imposes on the
+/// database itself.
 static CAREER_DB: OnceLock<std::sync::Mutex<Option<coop_mem::livedb::LiveDb>>> = OnceLock::new();
 
 fn career_db() -> &'static std::sync::Mutex<Option<coop_mem::livedb::LiveDb>> {
     CAREER_DB.get_or_init(|| std::sync::Mutex::new(None))
+}
+
+/// The handle the poller and the apply path share, attaching on first use.
+///
+/// One attach, not one per statement: `LiveDb` keeps a worker thread alive inside the game, and a handle per call
+/// would be a thread per call. Returns the error the attach produced, because "cannot find the database" is the
+/// normal state before a career is loaded and the caller decides whether to retry or report.
+fn shared_db() -> Result<std::sync::MutexGuard<'static, Option<coop_mem::livedb::LiveDb>>, String> {
+    let mut guard = match career_db().lock() {
+        Ok(g) => g,
+        Err(p) => p.into_inner(),
+    };
+    if guard.is_none() {
+        let db = coop_mem::livedb::LiveDb::attach(std::process::id())?;
+        *guard = Some(db);
+    }
+    Ok(guard)
 }
 
 /// Statistics for the heartbeat line: `(passes, tables read, changes produced, rows not carriable)`.
@@ -2633,34 +2660,29 @@ pub fn start_career_diff() {
         loop {
             std::thread::sleep(DIFF_INTERVAL);
 
-            // Attach lazily and keep it. A failure is retried with a message, because "no database yet" is the
-            // normal state before a career is loaded and must not be a permanent give-up.
+            // Attach lazily and keep it, through the same handle the inbound apply path uses. A failure is
+            // retried with a message, because "no database yet" is the normal state before a career is loaded and
+            // must not be a permanent give-up.
             //
             // The failure message is logged at most once a minute, not once a pass - and the pass counter is NOT
             // incremented while unattached, because that counter is what the heartbeat reads. Counting failed
             // attempts as passes made the "once a minute" test never true (20 real passes never arrive while the
             // attach keeps failing), which would have meant one attach-failure line every three seconds forever.
             // A dedicated counter for the retry rate is the honest fix: the two rates are different facts.
-            let mut guard = match career_db().lock() {
+            let guard = match shared_db() {
                 Ok(g) => g,
-                Err(p) => p.into_inner(),
-            };
-            if guard.is_none() {
-                let attempts = DIFF_ATTACH_ATTEMPTS.fetch_add(1, Ordering::Relaxed) + 1;
-                match coop_mem::livedb::LiveDb::attach(std::process::id()) {
-                    Ok(db) => {
-                        log("career diff: attached to the live database");
-                        *guard = Some(db);
+                Err(e) => {
+                    let attempts = DIFF_ATTACH_ATTEMPTS.fetch_add(1, Ordering::Relaxed) + 1;
+                    if attempts % 20 == 1 {
+                        log(&format!("career diff: no live database yet ({e}); retrying"));
                     }
-                    Err(e) => {
-                        if attempts % 20 == 1 {
-                            log(&format!("career diff: no live database yet ({e}); retrying"));
-                        }
-                        continue;
-                    }
+                    continue;
                 }
-            }
-            let Some(db) = guard.as_ref() else { continue };
+            };
+            let db = match guard.as_ref() {
+                Some(db) => db,
+                None => continue,
+            };
 
             // Reading must not be captured as a career change; it is a read, but `LiveDb::sql` goes through the
             // game's own `sqlite3_exec` and the capture hook fires on it. `sqlcap` classifies a SELECT as `Read` and
